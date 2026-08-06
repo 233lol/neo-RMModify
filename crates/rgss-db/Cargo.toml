@@ -1,0 +1,7 @@
+[package]
+name = "rgss-db"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rgss-marshal = { path = "../rgss-marshal" }

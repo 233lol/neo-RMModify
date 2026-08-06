@@ -1,0 +1,8 @@
+[package]
+name = "rgss-save"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rgss-marshal = { path = "../rgss-marshal" }
+rgss-db = { path = "../rgss-db" }

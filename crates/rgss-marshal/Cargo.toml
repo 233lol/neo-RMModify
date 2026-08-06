@@ -1,0 +1,11 @@
+[package]
+name = "rgss-marshal"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+num-bigint = "0.4"
+
+[[bin]]
+name = "rgss-dump"
+path = "src/bin/rgss-dump.rs"
