@@ -50,6 +50,8 @@ pub enum Tab {
 }
 
 impl App {
+    /// 仅供二进制入口使用（库测试目标不引用）
+    #[allow(dead_code)]
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         load_cn_font(&cc.egui_ctx);
         App {
@@ -176,7 +178,7 @@ impl App {
         else {
             return;
         };
-        let bytes = rgss_marshal::dump(&save.tree);
+        let bytes = save.dump_bytes();
         match std::fs::write(&new_path, bytes) {
             Ok(()) => {
                 self.dirty = false;
@@ -307,6 +309,7 @@ impl eframe::App for App {
 }
 
 /// 加载系统中文字体（黑体优先）
+#[allow(dead_code)]
 fn load_cn_font(ctx: &egui::Context) {
     let candidates = [
         "C:/Windows/Fonts/simhei.ttf", // 黑体

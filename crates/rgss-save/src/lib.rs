@@ -597,6 +597,63 @@ impl SaveData {
         false
     }
 
+    /// 角色参数修正值（加成）。
+    /// VXA：@param_plus 数组（8 项）；VX/XP：@maxhp_plus 等单字段。
+    /// 索引统一为 0=最大HP 1=最大MP 2=攻击 3=防御 4=魔法力 5=魔防 6=敏捷 7=运；
+    /// VX/XP 只有 0..=4 与 6（魔法力对应 @spi_plus，无魔防/运）。
+    pub fn actor_param_plus(&self, id: u32, idx: usize) -> Option<i64> {
+        let actor = self.actor(id)?;
+        if let Some(p) = self.tree.ivar(actor, "param_plus") {
+            if let Kind::Array(items) = self.tree.kind(p) {
+                return self.tree.as_fixnum(*items.get(idx)?);
+            }
+            return None;
+        }
+        let name = param_plus_field(idx)?;
+        let f = self.tree.ivar(actor, name)?;
+        self.tree.as_fixnum(f)
+    }
+
+    pub fn set_actor_param_plus(&mut self, id: u32, idx: usize, v: i64) -> bool {
+        let actor = match self.actor(id) {
+            Some(a) => a,
+            None => return false,
+        };
+        if let Some(p) = self.tree.ivar(actor, "param_plus") {
+            // VXA 数组风格（必要时扩展数组）
+            if !matches!(self.tree.kind(p), Kind::Array(_)) {
+                return false;
+            }
+            let len = match self.tree.kind(p) {
+                Kind::Array(items) => items.len(),
+                _ => 0,
+            };
+            if idx >= len {
+                let pads: Vec<u32> = (len..=idx).map(|_| self.tree.new_fixnum(0)).collect();
+                if let Kind::Array(items) = self.tree.kind_mut(p) {
+                    items.extend(pads);
+                }
+            }
+            let node = match self.tree.kind(p) {
+                Kind::Array(items) => items.get(idx).copied(),
+                _ => None,
+            };
+            if let Some(node) = node {
+                return self.tree.set_fixnum(node, v);
+            }
+            return false;
+        }
+        let name = match param_plus_field(idx) {
+            Some(n) => n,
+            None => return false,
+        };
+        let f = match self.tree.ivar(actor, name) {
+            Some(f) => f,
+            None => return false,
+        };
+        self.tree.set_fixnum(f, v)
+    }
+
     /// 角色技能列表
     pub fn actor_skills(&self, id: u32) -> Vec<u32> {
         self.actor_id_array(id, "skills")
@@ -673,11 +730,8 @@ impl SaveData {
         false
     }
 
-    /// 保存到文件（先备份，保持原始段落顺序）
-    pub fn save(&self) -> Result<(), String> {
-        let Some(path) = &self.path else {
-            return Err("没有存档路径".to_string());
-        };
+    /// 序列化为完整字节（主段 + 前后附加段，保持原始段落顺序）
+    pub fn dump_bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
         for t in &self.tail_before {
             out.extend_from_slice(&rgss_marshal::dump(t));
@@ -686,6 +740,15 @@ impl SaveData {
         for t in &self.tail_after {
             out.extend_from_slice(&rgss_marshal::dump(t));
         }
+        out
+    }
+
+    /// 保存到文件（先备份，保持原始段落顺序）
+    pub fn save(&self) -> Result<(), String> {
+        let Some(path) = &self.path else {
+            return Err("没有存档路径".to_string());
+        };
+        let out = self.dump_bytes();
         // 先写备份（原文件 -> .bak，已存在则覆盖；备份失败则取消保存以保护原文件）
         let bak = path.with_extension(format!(
             "{}.bak",
@@ -701,6 +764,21 @@ impl SaveData {
 // ---------------------------------------------------------------------------
 // 布局检测（独立函数，供多段存档挑选主段使用）
 // ---------------------------------------------------------------------------
+
+/// 参数修正索引 → 字段名（VX/XP 单字段风格）。
+/// 索引统一：0=最大HP 1=最大MP 2=攻击 3=防御 4=魔法力 5=魔防 6=敏捷 7=运；
+/// VX/XP 无 5（魔防）与 7（运）。
+fn param_plus_field(idx: usize) -> Option<&'static str> {
+    match idx {
+        0 => Some("maxhp_plus"),
+        1 => Some("maxmp_plus"),
+        2 => Some("atk_plus"),
+        3 => Some("def_plus"),
+        4 => Some("spi_plus"),
+        6 => Some("agi_plus"),
+        _ => None,
+    }
+}
 
 /// 检测树的顶层布局。数组形式（13/10 元素）或哈希包装（符号键）均可。
 fn seg_layout(tree: &Tree, engine: Engine) -> Option<Layout> {
@@ -815,6 +893,7 @@ mod tests {
         let s_hp = sym(&mut tree, "@hp");
         let s_mp = sym(&mut tree, "@mp");
         let s_exp = sym(&mut tree, "@exp");
+        let s_param_plus = sym(&mut tree, "@param_plus");
         let s_equips = sym(&mut tree, "@equips");
         let s_skills = sym(&mut tree, "@skills");
         let s_states = sym(&mut tree, "@states");
@@ -835,6 +914,8 @@ mod tests {
         let v_hp = tree.new_fixnum(100);
         let v_mp = tree.new_fixnum(50);
         let v_exp = tree.new_fixnum(0);
+        let pp: Vec<u32> = (0..8).map(|i| tree.new_fixnum(10 + i)).collect();
+        let param_plus = tree.alloc(Kind::Array(pp));
         let actor_obj = tree.alloc(Kind::Object {
             class: s_actor_cls,
             ivars: vec![
@@ -844,6 +925,7 @@ mod tests {
                 (s_hp, v_hp),
                 (s_mp, v_mp),
                 (s_exp, v_exp),
+                (s_param_plus, param_plus),
                 (s_equips, equips),
                 (s_skills, skills),
                 (s_states, states),
@@ -918,6 +1000,15 @@ mod tests {
         assert_eq!(save.actor_stat(1, "level"), Some(5));
         assert_eq!(save.actor_skills(1), vec![1]);
 
+        // 参数修正（VXA @param_plus 数组）
+        for (idx, want) in [10i64, 11, 12, 13, 14, 15, 16, 17].into_iter().enumerate() {
+            assert_eq!(save.actor_param_plus(1, idx), Some(want));
+        }
+        assert!(save.set_actor_param_plus(1, 0, 500)); // HP修正
+        assert!(save.set_actor_param_plus(1, 7, -3)); // 运修正
+        assert_eq!(save.actor_param_plus(1, 0), Some(500));
+        assert_eq!(save.actor_param_plus(1, 7), Some(-3));
+
         // 编辑
         assert!(save.set_gold(999));
         assert!(save.set_switch(3, true)); // 扩展数组
@@ -940,5 +1031,86 @@ mod tests {
         // 往返：解析 → dump 仍是合法 Marshal
         let bytes = rgss_marshal::dump(&save.tree);
         assert!(rgss_marshal::parse(&bytes).is_ok());
+    }
+
+    #[test]
+    fn param_plus_field_style_vx() {
+        // VX/XP 风格：无 @param_plus，用 @maxhp_plus 等单字段
+        let tree = make_vxa_save();
+        let mut save = SaveData::from_tree(tree, Engine::Vx);
+        // 先定位 @param_plus（只读），再移除并追加单字段（写）
+        let remove_at = {
+            let actor = save.actor(1).expect("角色");
+            match save.tree.kind(actor) {
+                Kind::Object { ivars, .. } => ivars
+                    .iter()
+                    .position(|(k, _)| save.tree.sym_bytes(*k) == b"@param_plus"),
+                _ => None,
+            }
+        };
+        let mut new_ivars: Vec<(u32, u32)> = Vec::new();
+        for (name, v) in [
+            ("maxhp_plus", 100i64),
+            ("maxmp_plus", 20),
+            ("spi_plus", 5),
+            ("agi_plus", -1),
+        ] {
+            let s = save.tree.alloc_sym(format!("@{name}").into_bytes());
+            new_ivars.push((s, save.tree.new_fixnum(v)));
+        }
+        {
+            let actor = save.actor(1).expect("角色");
+            if let Kind::Object { ivars, .. } = save.tree.kind_mut(actor) {
+                if let Some(p) = remove_at {
+                    ivars.remove(p);
+                }
+                ivars.extend(new_ivars);
+            }
+        }
+        assert_eq!(save.actor_param_plus(1, 0), Some(100));
+        assert_eq!(save.actor_param_plus(1, 1), Some(20));
+        assert_eq!(save.actor_param_plus(1, 4), Some(5)); // 魔法力 = @spi_plus
+        assert_eq!(save.actor_param_plus(1, 6), Some(-1)); // 敏捷
+        assert_eq!(save.actor_param_plus(1, 5), None); // 无魔防
+        assert_eq!(save.actor_param_plus(1, 7), None); // 无运
+        assert!(save.set_actor_param_plus(1, 0, 999));
+        assert_eq!(save.actor_param_plus(1, 0), Some(999));
+        assert!(!save.set_actor_param_plus(1, 5, 1)); // 不存在的字段
+    }
+
+    #[test]
+    fn level_exp_sync_with_table() {
+        let tree = make_vxa_save();
+        let mut save = SaveData::from_tree(tree, Engine::VxAce);
+        // 模拟 VXA @exp_params [30,20,30,30] 生成的表：exp[i] = 达到等级 i 的累计经验
+        let exps: Vec<i64> = {
+            let mut t = vec![0; 100];
+            for l in 1..=99 {
+                let lv = l as f64;
+                t[l] = (30.0 * (lv - 1.0)
+                    + 20.0 * (lv - 1.0) * lv / 2.0
+                    + 30.0 * (lv - 1.0) * lv * (2.0 * lv - 1.0) / 6.0)
+                    as i64;
+            }
+            t
+        };
+        // 设等级 → 经验联动为该等级所需累计经验（不按最大等级截断）
+        assert!(save.set_actor_level_sync(1, 10, &exps));
+        assert_eq!(save.actor_stat(1, "level"), Some(10));
+        assert_eq!(save.actor_exp(1), Some(9720));
+        assert!(save.set_actor_level_sync(1, 50, &exps));
+        assert_eq!(save.actor_exp(1), Some(1238720));
+        assert!(save.set_actor_level_sync(1, 99, &exps));
+        assert_eq!(save.actor_exp(1), Some(9656430));
+        // 设经验 → 等级按表推算（exp(21)=90900 ≤ 100000 < exp(22)=104580）
+        assert_eq!(save.set_actor_exp_sync(1, 100_000, &exps), Some(21));
+        assert_eq!(save.actor_stat(1, "level"), Some(21));
+        // 经验超出表尾 → 封顶为 99
+        assert_eq!(save.set_actor_exp_sync(1, 999_999_999, &exps), Some(99));
+        assert_eq!(save.actor_stat(1, "level"), Some(99));
+        // 无表时仅设等级、经验不变
+        assert!(save.set_actor_level_sync(1, 5, &[]));
+        assert_eq!(save.actor_stat(1, "level"), Some(5));
+        assert_eq!(save.actor_exp(1), Some(999_999_999));
     }
 }

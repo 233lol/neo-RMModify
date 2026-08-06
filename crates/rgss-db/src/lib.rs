@@ -82,6 +82,23 @@ pub fn detect_engine(game_dir: &Path) -> Option<Engine> {
         }
         return Some(Engine::Rm2000);
     }
+    // 无项目文件（如已发布/加密的游戏）：按 Data 目录的数据库文件判断
+    let data = game_dir.join("Data");
+    if data.is_dir() {
+        if data.join("System.rvdata2").exists() || data.join("System.rvdata").exists() {
+            // 通过 Game.ini 或默认判定；VXA 加密包 Game.rgss3a 也常见
+            if data.join("System.rvdata2").exists() {
+                return Some(Engine::VxAce);
+            }
+            return Some(Engine::Vx);
+        }
+        if data.join("System.rxdata").exists() {
+            return Some(Engine::Xp);
+        }
+        if data.join("RPG_RT.ldb").exists() {
+            return Some(Engine::Rm2000);
+        }
+    }
     None
 }
 
@@ -129,7 +146,8 @@ pub struct Database {
     pub switches: Vec<String>,
     /// 变量名，索引 1 起始
     pub variables: Vec<String>,
-    /// 职业经验表：class_id -> exp[i]（达到等级 i 的累计经验，标准 VXA 结构；无表则缺省）
+    /// 职业经验表：class_id -> exp[i]（达到等级 i 的累计经验，索引 0 占位；无表则缺省）。
+    /// XP 直接读 @exp 数组；VX/VXA 由 @exp_params 公式参数生成。
     pub class_exps: HashMap<u32, Vec<i64>>,
     /// 失败信息列表（如缺文件）
     pub warnings: Vec<String>,
@@ -203,7 +221,10 @@ impl Database {
             "classes"
         );
 
-        // 职业经验表（标准 VXA：RPG::Class @exp 数组，exp[i] = 达到等级 i 的累计经验）
+        // 职业经验表：exp[i] = 达到等级 i 的累计经验
+        // - XP：RPG::Class @exp 直接是累计数组
+        // - VX / VXA：RPG::Class @exp_params = [基础值, 追加值, 加速值, 最大等级]，
+        //   按公式 exp(l) = 基础值*(l-1) + 追加值*(l-1)*l/2 + 加速值*(l-1)*l*(2l-1)/6 生成
         let cls_path = data_dir.join(format!("Classes.{}", engine.data_ext()));
         if let Ok(tree) = parse_data(&cls_path) {
             if let Kind::Array(items) = tree.kind(tree.root()) {
@@ -218,6 +239,19 @@ impl Database {
                                 .map(|e| tree.as_fixnum(*e).unwrap_or(0))
                                 .collect();
                             if !table.is_empty() {
+                                db.class_exps.insert(i as u32, table);
+                                continue;
+                            }
+                        }
+                    }
+                    // VX / VXA：公式参数
+                    if let Some(exp) = tree.ivar(*item, "exp_params") {
+                        if let Kind::Array(es) = tree.kind(exp) {
+                            let params: Vec<i64> = es
+                                .iter()
+                                .map(|e| tree.as_fixnum(*e).unwrap_or(0))
+                                .collect();
+                            if let Some(table) = exp_table_from_params(&params) {
                                 db.class_exps.insert(i as u32, table);
                             }
                         }
@@ -269,6 +303,28 @@ fn parse_data(path: &Path) -> Result<Tree, String> {
     rgss_marshal::parse(&bytes).map_err(|e| e.to_string())
 }
 
+/// 由 VX/VXA 的 @exp_params 生成累计经验表（索引 = 等级，1..=99）。
+/// 参数 = [基础值, 追加值, 加速值, 最大等级]（最大等级仅作参考，不限制表长）；
+/// 公式与 RGSS3 Game_Actor 一致：
+/// exp(l) = 基础值*(l-1) + 追加值*(l-1)*l/2 + 加速值*(l-1)*l*(2l-1)/6
+/// 无有效参数或基础值为 0（无经验曲线）时返回 None。
+fn exp_table_from_params(params: &[i64]) -> Option<Vec<i64>> {
+    if params.len() < 3 || params[0] <= 0 {
+        return None;
+    }
+    let base = params[0] as f64;
+    let extra = params[1] as f64;
+    let accel = params[2] as f64;
+    let mut table = vec![0; 100];
+    for l in 1..=99usize {
+        let lv = l as f64;
+        table[l] = (base * (lv - 1.0)
+            + extra * (lv - 1.0) * lv / 2.0
+            + accel * (lv - 1.0) * lv * (2.0 * lv - 1.0) / 6.0) as i64;
+    }
+    Some(table)
+}
+
 /// 从数据库数组提取条目（数组 [0]=nil，[1..] 为对象）
 fn extract_entries(tree: &Tree, field: &str) -> Vec<DbEntry> {
     let _ = field;
@@ -315,4 +371,41 @@ fn extract_name_array(tree: &Tree, arr: u32) -> Vec<String> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::exp_table_from_params;
+
+    #[test]
+    fn exp_params_vxa_table() {
+        // 默认 VXA 参数 [30, 20, 30, 30]
+        let t = exp_table_from_params(&[30, 20, 30, 30]).expect("应有表");
+        assert_eq!(t.len(), 100); // 索引 0 占位 + 等级 1..=99
+        assert_eq!(t[1], 0);
+        assert_eq!(t[2], 80);
+        assert_eq!(t[3], 270);
+        assert_eq!(t[5], 1220);
+        assert_eq!(t[10], 9720);
+        assert_eq!(t[30], 266220);
+        // 表不按最大等级(第 4 项=30)截断：50/99 级有各自的经验
+        assert_eq!(t[50], 1238720);
+        assert_eq!(t[99], 9656430);
+    }
+
+    #[test]
+    fn exp_params_vx_no_max_level() {
+        // VX 参数只有 3 项
+        let t = exp_table_from_params(&[30, 20, 30]).expect("应有表");
+        assert_eq!(t.len(), 100);
+        assert_eq!(t[50], 1238720);
+        assert_eq!(t[99], 9656430);
+    }
+
+    #[test]
+    fn exp_params_invalid() {
+        assert!(exp_table_from_params(&[0, 20, 30, 30]).is_none()); // 无经验曲线
+        assert!(exp_table_from_params(&[30, 20]).is_none()); // 参数不足
+        assert!(exp_table_from_params(&[]).is_none());
+    }
 }

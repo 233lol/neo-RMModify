@@ -139,14 +139,14 @@ fn show_actor_detail(
     let stats: Vec<(&str, &str, i64, i64)> = if has_sp {
         vec![
             ("level", "等级", 1, 99),
-            ("hp", "HP", 0, 999_999),
-            ("sp", "SP", 0, 999_999),
+            ("hp", "当前HP", 0, 999_999),
+            ("sp", "当前SP", 0, 999_999),
         ]
     } else {
         vec![
             ("level", "等级", 1, 99),
-            ("hp", "HP", 0, 999_999),
-            ("mp", "MP", 0, 999_999),
+            ("hp", "当前HP", 0, 999_999),
+            ("mp", "当前MP", 0, 999_999),
         ]
     };
 
@@ -199,9 +199,47 @@ fn show_actor_detail(
         });
     });
     if exps.is_empty() {
-        ui.weak("提示: 该角色职业没有标准经验表（@exp），等级与经验不联动。");
+        ui.weak("提示: 该角色职业没有经验曲线（@exp / @exp_params），等级与经验不联动。");
     } else {
         ui.weak("提示: 等级与经验已联动（按职业经验表自动换算）。");
+    }
+
+    // 参数修正值（VXA: @param_plus 数组；VX/XP: @maxhp_plus 等单字段）
+    let param_mods: Vec<(&str, usize)> = [
+        ("HP修正", 0),
+        ("MP修正", 1),
+        ("攻击修正", 2),
+        ("防御修正", 3),
+        ("魔法力修正", 4),
+        ("魔防修正", 5),
+        ("敏捷修正", 6),
+        ("运修正", 7),
+    ]
+    .into_iter()
+    .filter(|(_, idx)| save.actor_param_plus(actor_id, *idx).is_some())
+    .collect();
+    if !param_mods.is_empty() {
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("参数修正").strong());
+            ui.weak("（叠加在职业基础数值上的加成）");
+        });
+        ui.horizontal_wrapped(|ui| {
+            for (label, idx) in &param_mods {
+                ui.vertical(|ui| {
+                    ui.label(RichText::new(*label).weak());
+                    let v = save.actor_param_plus(actor_id, *idx).unwrap_or(0);
+                    let mut val = v;
+                    if ui
+                        .add(egui::DragValue::new(&mut val).range(-99_999..=99_999).speed(1.0))
+                        .changed()
+                    {
+                        save.set_actor_param_plus(actor_id, *idx, val);
+                        *dirty = true;
+                    }
+                });
+            }
+        });
     }
 
     ui.add_space(8.0);

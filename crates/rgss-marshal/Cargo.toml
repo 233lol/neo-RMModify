@@ -6,6 +6,9 @@ edition.workspace = true
 [dependencies]
 num-bigint = "0.4"
 
+[dev-dependencies]
+flate2 = "1"
+
 [[bin]]
 name = "rgss-dump"
 path = "src/bin/rgss-dump.rs"

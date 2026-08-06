@@ -5,6 +5,17 @@ use rgss_save::{InvKind, SaveData};
 
 use crate::app::App;
 
+/// 测试钩子：记录上一帧渲染的 数量输入框 / 删除按钮 屏幕位置（仅测试用）
+#[cfg(test)]
+pub(crate) mod test_hooks {
+    thread_local! {
+        pub(crate) static TEST_QTY_RECTS: std::cell::RefCell<Vec<egui::Rect>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+        pub(crate) static TEST_DELETE_RECTS: std::cell::RefCell<Vec<egui::Rect>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+}
+
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let App {
         save,
@@ -37,6 +48,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             ui.label(RichText::new("名称").strong());
             ui.label(RichText::new("ID").strong());
             ui.label(RichText::new("数量").strong());
+            ui.label(RichText::new("").strong());
             ui.label(RichText::new("描述").strong());
             ui.end_row();
 
@@ -50,11 +62,21 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 ui.label(name);
                 ui.label(id.to_string());
                 let mut q = *qty;
-                if ui
-                    .add(egui::DragValue::new(&mut q).range(0..=999_999).speed(1.0))
-                    .changed()
-                {
+                let qty_resp = ui
+                    .add(egui::DragValue::new(&mut q).range(0..=999_999).speed(1.0));
+                #[cfg(test)]
+                crate::ui_inventory::test_hooks::TEST_QTY_RECTS.with(|r| r.borrow_mut().push(qty_resp.rect));
+                if qty_resp.changed() {
                     save.set_inventory_qty(*inv_tab, *id, q);
+                    *dirty = true;
+                }
+                let del_resp = ui
+                    .small_button("删除")
+                    .on_hover_text("删除该物品（数量置 0）");
+                #[cfg(test)]
+                crate::ui_inventory::test_hooks::TEST_DELETE_RECTS.with(|r| r.borrow_mut().push(del_resp.rect));
+                if del_resp.clicked() {
+                    save.set_inventory_qty(*inv_tab, *id, 0);
                     *dirty = true;
                 }
                 ui.label(RichText::new(extra).weak());
