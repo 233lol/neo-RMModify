@@ -7,7 +7,9 @@ edition.workspace = true
 rgss-marshal = { path = "../rgss-marshal" }
 rgss-db = { path = "../rgss-db" }
 rgss-save = { path = "../rgss-save" }
-eframe = "0.36"
-egui = "0.36"
+# 关闭默认特性（wgpu/accesskit/wayland/x11/default_fonts 等），仅保留 glow 后端，大幅缩小体积
+eframe = { version = "0.36", default-features = false, features = ["glow"] }
+# 不用 egui 内置字体（1.4MB），改为内嵌最小子集 + 系统字体
+egui = { version = "0.36", default-features = false }
 rfd = "0.17"
 

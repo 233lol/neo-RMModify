@@ -87,6 +87,7 @@ mod tests {
     #[test]
     fn inventory_delete_button_removes_item() {
         let ctx = egui::Context::default();
+        crate::app::load_cn_font(&ctx);
         let mut app = make_app();
         run_frame(&ctx, &mut app, Vec::new());
 
@@ -116,6 +117,7 @@ mod tests {
     #[test]
     fn inventory_qty_drag_to_zero_removes_item() {
         let ctx = egui::Context::default();
+        crate::app::load_cn_font(&ctx);
         let mut app = make_app();
         run_frame(&ctx, &mut app, Vec::new());
 
