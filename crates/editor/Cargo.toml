@@ -5,6 +5,7 @@ edition.workspace = true
 
 [dependencies]
 rgss-marshal = { path = "../rgss-marshal" }
+rgss-lcf = { path = "../rgss-lcf" }
 rgss-db = { path = "../rgss-db" }
 rgss-save = { path = "../rgss-save" }
 # 关闭默认特性（wgpu/accesskit/wayland/x11/default_fonts 等），仅保留 glow 后端，大幅缩小体积

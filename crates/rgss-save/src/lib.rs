@@ -6,6 +6,10 @@
 //! - 队伍：Game_Party 的 @gold / @items / @weapons / @armors / @actors
 //!
 //! 非标准布局（如自定义脚本游戏）下所有操作返回 None/空，由编辑器提供原始树浏览。
+//!
+//! RPG Maker 2000/2003（LCF/LSD 格式）见 [`lcf`] 模块。
+
+pub mod lcf;
 
 use rgss_db::Engine;
 use rgss_marshal::{Kind, Tree};
@@ -50,6 +54,9 @@ pub struct SaveData {
     pub layout: Option<Layout>,
     /// 解析提示（如布局不匹配）
     pub note: Option<String>,
+    /// 分段对象布局（自定义脚本把每个 Game_* 对象单独一段）：
+    /// 角色 → (段索引, 节点)。段索引按文件顺序：tail_before ++ [tree] ++ tail_after。
+    pub seg_roles: Option<SegRoles>,
 }
 
 /// 顶层布局定位（节点索引）
@@ -63,13 +70,30 @@ pub struct Layout {
     pub party: Option<u32>,
 }
 
+/// 分段对象布局（"每对象一段"的存档，如常见 VX 自定义脚本存档）
+#[derive(Debug, Clone, Default)]
+pub struct SegRoles {
+    pub switches: Option<(usize, u32)>,
+    pub variables: Option<(usize, u32)>,
+    pub actors: Option<(usize, u32)>,
+    pub party: Option<(usize, u32)>,
+    pub system: Option<(usize, u32)>,
+}
+
 impl SaveData {
     /// 打开存档文件（支持多段 Marshal 拼接存档，自动选择标准布局段为主段）
     pub fn open(path: &Path) -> Result<SaveData, String> {
         let engine = rgss_db::detect_engine(path.parent().unwrap_or(Path::new(".")))
             .unwrap_or(Engine::VxAce);
         let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
-        let mut segments = rgss_marshal::parse_multi(&bytes).map_err(|e| e.to_string())?;
+        let mut save = SaveData::from_bytes(&bytes, engine)?;
+        save.path = Some(path.to_path_buf());
+        Ok(save)
+    }
+
+    /// 从字节构造（不读文件；path 为 None）。布局检测与 open 一致。
+    pub fn from_bytes(bytes: &[u8], engine: Engine) -> Result<SaveData, String> {
+        let mut segments = rgss_marshal::parse_multi(bytes).map_err(|e| e.to_string())?;
         let mut note: Option<String> = None;
         if segments.len() > 1 {
             note = Some(format!(
@@ -88,17 +112,29 @@ impl SaveData {
                 break;
             }
         }
+        // 标准布局缺失时尝试"每对象一段"的分段布局（常见 VX 自定义脚本存档）
+        let mut seg_roles = None;
+        if layout.is_none() {
+            seg_roles = detect_seg_roles(&segments);
+            if seg_roles.is_some() {
+                note = Some(format!(
+                    "该存档为 {} 段独立对象格式（自定义脚本），已自动识别。",
+                    segments.len()
+                ));
+            }
+        }
         let tree = segments.remove(main_idx);
         let mut save = SaveData {
             tail_before: segments[..main_idx.min(segments.len())].to_vec(),
             tail_after: segments[main_idx.min(segments.len())..].to_vec(),
             tree,
             engine,
-            path: Some(path.to_path_buf()),
+            path: None,
             layout,
             note,
+            seg_roles,
         };
-        if save.layout.is_none() && save.note.is_none() {
+        if save.layout.is_none() && save.seg_roles.is_none() && save.note.is_none() {
             save.note = Some("存档结构不是标准布局（可能使用了自定义脚本），部分功能不可用。可在“原始数据”标签页编辑。".to_string());
         }
         Ok(save)
@@ -106,7 +142,133 @@ impl SaveData {
 
     pub fn from_tree(tree: Tree, engine: Engine) -> SaveData {
         let layout = seg_layout(&tree, engine);
-        SaveData { tree, tail_before: Vec::new(), tail_after: Vec::new(), engine, path: None, layout, note: None }
+        SaveData {
+            tree,
+            tail_before: Vec::new(),
+            tail_after: Vec::new(),
+            engine,
+            path: None,
+            layout,
+            note: None,
+            seg_roles: None,
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // 布局定位
+    // ------------------------------------------------------------------
+
+    /// 按文件顺序取第 idx 段（tail_before ++ [tree] ++ tail_after）
+    fn seg_tree(&self, idx: usize) -> &Tree {
+        if idx < self.tail_before.len() {
+            &self.tail_before[idx]
+        } else if idx == self.tail_before.len() {
+            &self.tree
+        } else {
+            &self.tail_after[idx - self.tail_before.len() - 1]
+        }
+    }
+
+    fn seg_tree_mut(&mut self, idx: usize) -> &mut Tree {
+        if idx < self.tail_before.len() {
+            &mut self.tail_before[idx]
+        } else if idx == self.tail_before.len() {
+            &mut self.tree
+        } else {
+            &mut self.tail_after[idx - self.tail_before.len() - 1]
+        }
+    }
+
+    /// 角色 → (所在段树, 节点)。优先标准布局，其次分段角色。
+    /// 节点越界（畸形存档）时返回 None，避免 panic。
+    fn role_node(
+        &self,
+        standard: Option<u32>,
+        seg: Option<(usize, u32)>,
+    ) -> Option<(&Tree, u32)> {
+        let (tree, node) = if let Some(node) = standard {
+            (&self.tree, node)
+        } else {
+            let (si, node) = seg?;
+            (self.seg_tree(si), node)
+        };
+        if node >= tree.node_count() as u32 {
+            return None;
+        }
+        Some((tree, node))
+    }
+
+    fn role_node_mut(
+        &mut self,
+        standard: Option<u32>,
+        seg: Option<(usize, u32)>,
+    ) -> Option<(&mut Tree, u32)> {
+        let (tree, node) = if let Some(node) = standard {
+            (&mut self.tree, node)
+        } else {
+            let (si, node) = seg?;
+            (self.seg_tree_mut(si), node)
+        };
+        if node >= tree.node_count() as u32 {
+            return None;
+        }
+        Some((tree, node))
+    }
+
+    fn switches_node(&self) -> Option<(&Tree, u32)> {
+        self.role_node(
+            self.layout.as_ref().and_then(|l| l.switches),
+            self.seg_roles.as_ref().and_then(|r| r.switches),
+        )
+    }
+
+    fn variables_node(&self) -> Option<(&Tree, u32)> {
+        self.role_node(
+            self.layout.as_ref().and_then(|l| l.variables),
+            self.seg_roles.as_ref().and_then(|r| r.variables),
+        )
+    }
+
+    fn party_node(&self) -> Option<(&Tree, u32)> {
+        self.role_node(
+            self.layout.as_ref().and_then(|l| l.party),
+            self.seg_roles.as_ref().and_then(|r| r.party),
+        )
+    }
+
+    fn actors_node(&self) -> Option<(&Tree, u32)> {
+        self.role_node(
+            self.layout.as_ref().and_then(|l| l.actors),
+            self.seg_roles.as_ref().and_then(|r| r.actors),
+        )
+    }
+
+    fn switches_node_mut(&mut self) -> Option<(&mut Tree, u32)> {
+        self.role_node_mut(
+            self.layout.as_ref().and_then(|l| l.switches),
+            self.seg_roles.as_ref().and_then(|r| r.switches),
+        )
+    }
+
+    fn variables_node_mut(&mut self) -> Option<(&mut Tree, u32)> {
+        self.role_node_mut(
+            self.layout.as_ref().and_then(|l| l.variables),
+            self.seg_roles.as_ref().and_then(|r| r.variables),
+        )
+    }
+
+    fn party_node_mut(&mut self) -> Option<(&mut Tree, u32)> {
+        self.role_node_mut(
+            self.layout.as_ref().and_then(|l| l.party),
+            self.seg_roles.as_ref().and_then(|r| r.party),
+        )
+    }
+
+    fn actors_node_mut(&mut self) -> Option<(&mut Tree, u32)> {
+        self.role_node_mut(
+            self.layout.as_ref().and_then(|l| l.actors),
+            self.seg_roles.as_ref().and_then(|r| r.actors),
+        )
     }
 
     // ------------------------------------------------------------------
@@ -114,26 +276,29 @@ impl SaveData {
     // ------------------------------------------------------------------
 
     /// @data 数组节点（Game_Switches / Game_Variables）
-    fn data_array(&self, obj: Option<u32>) -> Option<u32> {
+    fn data_array(tree: &Tree, obj: Option<u32>) -> Option<u32> {
         let obj = obj?;
-        let d = self.tree.ivar(obj, "data")?;
-        match self.tree.kind(d) {
+        let d = tree.ivar(obj, "data")?;
+        match tree.kind(d) {
             Kind::Array(_) => Some(d),
             _ => None,
         }
     }
 
     pub fn switch_ids(&self) -> Vec<u32> {
-        let Some(arr) = self.data_array(self.layout.as_ref().and_then(|l| l.switches)) else {
+        let Some((tree, obj)) = self.switches_node() else {
+            return vec![];
+        };
+        let Some(arr) = Self::data_array(tree, Some(obj)) else {
             return vec![];
         };
         let mut out = Vec::new();
-        if let Kind::Array(items) = self.tree.kind(arr) {
+        if let Kind::Array(items) = tree.kind(arr) {
             for (i, item) in items.iter().enumerate() {
                 if i == 0 {
                     continue;
                 }
-                if self.tree.as_bool(*item).is_some() {
+                if tree.as_bool(*item).is_some() {
                     out.push(i as u32);
                 }
             }
@@ -143,10 +308,9 @@ impl SaveData {
 
     /// 开关 @data 数组长度（含 0 号占位；无布局或非数组时返回 0）
     pub fn switch_array_len(&self) -> usize {
-        let Some(arr) = self.data_array(self.layout.as_ref().and_then(|l| l.switches)) else {
-            return 0;
-        };
-        match self.tree.kind(arr) {
+        let Some((tree, obj)) = self.switches_node() else { return 0 };
+        let Some(arr) = Self::data_array(tree, Some(obj)) else { return 0 };
+        match tree.kind(arr) {
             Kind::Array(items) => items.len(),
             _ => 0,
         }
@@ -154,21 +318,21 @@ impl SaveData {
 
     /// 变量 @data 数组长度（含 0 号占位；无布局或非数组时返回 0）
     pub fn variable_array_len(&self) -> usize {
-        let Some(arr) = self.data_array(self.layout.as_ref().and_then(|l| l.variables)) else {
-            return 0;
-        };
-        match self.tree.kind(arr) {
+        let Some((tree, obj)) = self.variables_node() else { return 0 };
+        let Some(arr) = Self::data_array(tree, Some(obj)) else { return 0 };
+        match tree.kind(arr) {
             Kind::Array(items) => items.len(),
             _ => 0,
         }
     }
 
     pub fn switch(&self, id: u32) -> Option<bool> {
-        let arr = self.data_array(self.layout.as_ref().and_then(|l| l.switches))?;
-        match self.tree.kind(arr) {
+        let (tree, obj) = self.switches_node()?;
+        let arr = Self::data_array(tree, Some(obj))?;
+        match tree.kind(arr) {
             Kind::Array(items) => {
                 let item = *items.get(id as usize)?;
-                self.tree.as_bool(item).or(Some(false))
+                tree.as_bool(item).or(Some(false))
             }
             _ => None,
         }
@@ -176,40 +340,42 @@ impl SaveData {
 
     /// 设置开关（必要时扩展 @data 数组）
     pub fn set_switch(&mut self, id: u32, on: bool) -> bool {
-        let Some(arr) = self.data_array(self.layout.as_ref().and_then(|l| l.switches)) else {
-            return false;
-        };
+        let Some((tree, obj)) = self.switches_node_mut() else { return false };
+        let Some(arr) = Self::data_array(tree, Some(obj)) else { return false };
         let need = id as usize + 1;
-        let len = match self.tree.kind(arr) {
+        let len = match tree.kind(arr) {
             Kind::Array(items) => items.len(),
             _ => return false,
         };
         if len < need {
             for _ in len..need {
-                let n = self.tree.new_bool(false);
-                if let Kind::Array(items) = self.tree.kind_mut(arr) {
+                let n = tree.new_bool(false);
+                if let Kind::Array(items) = tree.kind_mut(arr) {
                     items.push(n);
                 }
             }
         }
-        let val = self.tree.new_bool(on);
-        if let Kind::Array(items) = self.tree.kind_mut(arr) {
+        let val = tree.new_bool(on);
+        if let Kind::Array(items) = tree.kind_mut(arr) {
             items[id as usize] = val;
         }
         true
     }
 
     pub fn variable_ids(&self) -> Vec<u32> {
-        let Some(arr) = self.data_array(self.layout.as_ref().and_then(|l| l.variables)) else {
+        let Some((tree, obj)) = self.variables_node() else {
+            return vec![];
+        };
+        let Some(arr) = Self::data_array(tree, Some(obj)) else {
             return vec![];
         };
         let mut out = Vec::new();
-        if let Kind::Array(items) = self.tree.kind(arr) {
+        if let Kind::Array(items) = tree.kind(arr) {
             for (i, item) in items.iter().enumerate() {
                 if i == 0 {
                     continue;
                 }
-                if self.tree.as_fixnum(*item).is_some() {
+                if tree.as_fixnum(*item).is_some() {
                     out.push(i as u32);
                 }
             }
@@ -218,35 +384,35 @@ impl SaveData {
     }
 
     pub fn variable(&self, id: u32) -> Option<i64> {
-        let arr = self.data_array(self.layout.as_ref().and_then(|l| l.variables))?;
-        match self.tree.kind(arr) {
+        let (tree, obj) = self.variables_node()?;
+        let arr = Self::data_array(tree, Some(obj))?;
+        match tree.kind(arr) {
             Kind::Array(items) => {
                 let item = *items.get(id as usize)?;
-                self.tree.as_fixnum(item).or(Some(0))
+                tree.as_fixnum(item).or(Some(0))
             }
             _ => None,
         }
     }
 
     pub fn set_variable(&mut self, id: u32, v: i64) -> bool {
-        let Some(arr) = self.data_array(self.layout.as_ref().and_then(|l| l.variables)) else {
-            return false;
-        };
+        let Some((tree, obj)) = self.variables_node_mut() else { return false };
+        let Some(arr) = Self::data_array(tree, Some(obj)) else { return false };
         let need = id as usize + 1;
-        let len = match self.tree.kind(arr) {
+        let len = match tree.kind(arr) {
             Kind::Array(items) => items.len(),
             _ => return false,
         };
         if len < need {
             for _ in len..need {
-                let n = self.tree.new_fixnum(0);
-                if let Kind::Array(items) = self.tree.kind_mut(arr) {
+                let n = tree.new_fixnum(0);
+                if let Kind::Array(items) = tree.kind_mut(arr) {
                     items.push(n);
                 }
             }
         }
-        let val = self.tree.new_fixnum(v);
-        if let Kind::Array(items) = self.tree.kind_mut(arr) {
+        let val = tree.new_fixnum(v);
+        if let Kind::Array(items) = tree.kind_mut(arr) {
             items[id as usize] = val;
         }
         true
@@ -256,37 +422,33 @@ impl SaveData {
     // 队伍 / 金钱 / 背包
     // ------------------------------------------------------------------
 
-    fn party(&self) -> Option<u32> {
-        self.layout.as_ref().and_then(|l| l.party)
-    }
-
     pub fn gold(&self) -> Option<i64> {
-        let p = self.party()?;
-        let g = self.tree.ivar(p, "gold")?;
-        self.tree.as_fixnum(g)
+        let (tree, p) = self.party_node()?;
+        let g = tree.ivar(p, "gold")?;
+        tree.as_fixnum(g)
     }
 
     pub fn set_gold(&mut self, v: i64) -> bool {
-        let p = match self.party() {
-            Some(p) => p,
+        let (tree, p) = match self.party_node_mut() {
+            Some(x) => x,
             None => return false,
         };
-        let g = match self.tree.ivar(p, "gold") {
+        let g = match tree.ivar(p, "gold") {
             Some(g) => g,
             None => return false,
         };
-        self.tree.set_fixnum(g, v)
+        tree.set_fixnum(g, v)
     }
 
     /// 背包内容 (id, 数量)，按出现顺序
     pub fn inventory(&self, kind: InvKind) -> Vec<(u32, i64)> {
-        let Some(p) = self.party() else { return vec![] };
-        let Some(h) = self.tree.ivar(p, kind.ivar()) else { return vec![] };
+        let Some((tree, p)) = self.party_node() else { return vec![] };
+        let Some(h) = tree.ivar(p, kind.ivar()) else { return vec![] };
         let mut out = Vec::new();
-        if let Kind::Hash { pairs, .. } = self.tree.kind(h) {
+        if let Kind::Hash { pairs, .. } = tree.kind(h) {
             for (k, v) in pairs {
-                if let Some(id) = self.tree.as_fixnum(*k) {
-                    if let Some(q) = self.tree.as_fixnum(*v) {
+                if let Some(id) = tree.as_fixnum(*k) {
+                    if let Some(q) = tree.as_fixnum(*v) {
                         out.push((id as u32, q));
                     }
                 }
@@ -297,40 +459,40 @@ impl SaveData {
 
     /// 设置某物数量；数量为 0 时移除条目
     pub fn set_inventory_qty(&mut self, kind: InvKind, id: u32, qty: i64) -> bool {
-        let p = match self.party() {
-            Some(p) => p,
+        let (tree, p) = match self.party_node_mut() {
+            Some(x) => x,
             None => return false,
         };
-        let h = match self.tree.ivar(p, kind.ivar()) {
+        let h = match tree.ivar(p, kind.ivar()) {
             Some(h) => h,
             None => return false,
         };
-        let pos = match self.tree.kind(h) {
+        let pos = match tree.kind(h) {
             Kind::Hash { pairs, .. } => {
                 let key = id as i64;
                 pairs
                     .iter()
-                    .position(|(k, _)| matches!(self.tree.kind(*k), Kind::Fixnum(f) if *f == key))
+                    .position(|(k, _)| matches!(tree.kind(*k), Kind::Fixnum(f) if *f == key))
             }
             _ => return false,
         };
         if let Some(pos) = pos {
-            let v = match self.tree.kind(h) {
+            let v = match tree.kind(h) {
                 Kind::Hash { pairs, .. } => pairs[pos].1,
                 _ => return false,
             };
             if qty <= 0 {
-                if let Kind::Hash { pairs, .. } = self.tree.kind_mut(h) {
+                if let Kind::Hash { pairs, .. } = tree.kind_mut(h) {
                     pairs.remove(pos);
                 }
                 return true;
             }
-            return self.tree.set_fixnum(v, qty);
+            return tree.set_fixnum(v, qty);
         }
         if qty > 0 {
-            let key = self.tree.new_fixnum(id as i64);
-            let val = self.tree.new_fixnum(qty);
-            if let Kind::Hash { pairs, .. } = self.tree.kind_mut(h) {
+            let key = tree.new_fixnum(id as i64);
+            let val = tree.new_fixnum(qty);
+            if let Kind::Hash { pairs, .. } = tree.kind_mut(h) {
                 pairs.push((key, val));
             }
         }
@@ -353,13 +515,13 @@ impl SaveData {
 
     /// 队伍成员（Game_Party @actors 数组，VXA 里也可能是 @party_members）
     pub fn party_member_ids(&self) -> Vec<u32> {
-        let Some(p) = self.party() else { return vec![] };
-        let arr = self.tree.ivar(p, "actors").or_else(|| self.tree.ivar(p, "party_members"));
+        let Some((tree, p)) = self.party_node() else { return vec![] };
+        let arr = tree.ivar(p, "actors").or_else(|| tree.ivar(p, "party_members"));
         let Some(arr) = arr else { return vec![] };
         let mut out = Vec::new();
-        if let Kind::Array(items) = self.tree.kind(arr) {
+        if let Kind::Array(items) = tree.kind(arr) {
             for it in items {
-                if let Some(id) = self.tree.as_fixnum(*it) {
+                if let Some(id) = tree.as_fixnum(*it) {
                     out.push(id as u32);
                 }
             }
@@ -371,15 +533,58 @@ impl SaveData {
     // 角色
     // ------------------------------------------------------------------
 
+    /// 定位角色对象节点：(段树, Game_Actor 节点)
+    fn actor_node(&self, id: u32) -> Option<(&Tree, u32)> {
+        let (tree, a) = self.actors_node()?;
+        let h = tree.ivar(a, "data")?;
+        let node = match tree.kind(h) {
+            Kind::Hash { pairs, .. } => pairs
+                .iter()
+                .find(|(k, _)| matches!(tree.kind(*k), Kind::Fixnum(f) if *f == id as i64))
+                .map(|(_, v)| *v)?,
+            Kind::Array(items) => {
+                let it = *items.get(id as usize)?;
+                if it == rgss_marshal::NIL_NODE || matches!(tree.kind(it), Kind::Nil) {
+                    return None;
+                }
+                it
+            }
+            _ => return None,
+        };
+        Some((tree, node))
+    }
+
+    fn actor_node_mut(&mut self, id: u32) -> Option<(&mut Tree, u32)> {
+        let (tree, a) = self.actors_node_mut()?;
+        let h = tree.ivar(a, "data")?;
+        let node = match tree.kind(h) {
+            Kind::Hash { pairs, .. } => {
+                let pos = pairs
+                    .iter()
+                    .position(|(k, _)| matches!(tree.kind(*k), Kind::Fixnum(f) if *f == id as i64))?;
+                pairs[pos].1
+            }
+            Kind::Array(items) => {
+                let it = *items.get(id as usize)?;
+                if it == rgss_marshal::NIL_NODE || matches!(tree.kind(it), Kind::Nil) {
+                    return None;
+                }
+                it
+            }
+            _ => return None,
+        };
+        Some((tree, node))
+    }
+
     /// Game_Actors @data 中的所有角色 id（支持 Hash {id => actor} 与 Array [nil, actor…] 两种自定义结构）
     pub fn actor_ids(&self) -> Vec<u32> {
-        let Some(a) = self.layout.as_ref().and_then(|l| l.actors) else { return vec![] };
-        let Some(h) = self.tree.ivar(a, "data") else { return vec![] };
+        let Some((tree, a)) = self.actors_node() else { return vec![] };
+        let Some(h) = tree.ivar(a, "data") else { return vec![] };
         let mut out = Vec::new();
-        match self.tree.kind(h) {
+        match tree.kind(h) {
             Kind::Hash { pairs, .. } => {
                 for (k, _) in pairs {
-                    if let Some(id) = self.tree.as_fixnum(*k) {
+                    if let Some(id) = tree.as_fixnum(*k) {
                         out.push(id as u32);
                     }
                 }
@@ -390,7 +595,7 @@ impl SaveData {
                         continue;
                     }
                     let is_nil = *it == rgss_marshal::NIL_NODE
-                        || matches!(self.tree.kind(*it), Kind::Nil);
+                        || matches!(tree.kind(*it), Kind::Nil);
                     if !is_nil {
                         out.push(i as u32);
                     }
@@ -403,100 +608,92 @@ impl SaveData {
     }
 
     pub fn actor(&self, id: u32) -> Option<u32> {
-        let a = self.layout.as_ref().and_then(|l| l.actors)?;
-        let h = self.tree.ivar(a, "data")?;
-        match self.tree.kind(h) {
-            Kind::Hash { pairs, .. } => {
-                pairs
-                    .iter()
-                    .find(|(k, _)| matches!(self.tree.kind(*k), Kind::Fixnum(f) if *f == id as i64))
-                    .map(|(_, v)| *v)
-            }
-            Kind::Array(items) => {
-                let it = *items.get(id as usize)?;
-                if it == rgss_marshal::NIL_NODE || matches!(self.tree.kind(it), Kind::Nil) {
-                    None
-                } else {
-                    Some(it)
-                }
-            }
-            _ => None,
-        }
+        self.actor_node(id).map(|(_, node)| node)
     }
 
     pub fn actor_name(&self, id: u32) -> Option<String> {
-        let actor = self.actor(id)?;
-        self.tree
-            .ivar(actor, "name")
-            .and_then(|n| self.tree.as_string(n))
+        let (tree, actor) = self.actor_node(id)?;
+        tree.ivar(actor, "name")
+            .and_then(|n| tree.as_string(n))
             .or_else(|| Some(format!("角色 {}", id)))
+    }
+
+    /// 角色改名（写入 @name ivar；UTF-8）
+    pub fn rename_actor(&mut self, id: u32, name: &str) -> bool {
+        let (tree, actor) = match self.actor_node_mut(id) {
+            Some(x) => x,
+            None => return false,
+        };
+        let n = match tree.ivar(actor, "name") {
+            Some(n) => n,
+            None => return false,
+        };
+        tree.set_utf8_string(n, name)
     }
 
     /// 读取角色属性
     pub fn actor_stat(&self, id: u32, iv: &str) -> Option<i64> {
-        let actor = self.actor(id)?;
-        let v = self.tree.ivar(actor, iv)?;
-        self.tree.as_fixnum(v)
+        let (tree, actor) = self.actor_node(id)?;
+        let v = tree.ivar(actor, iv)?;
+        tree.as_fixnum(v)
     }
 
     pub fn set_actor_stat(&mut self, id: u32, iv: &str, v: i64) -> bool {
-        let actor = match self.actor(id) {
-            Some(a) => a,
+        let (tree, actor) = match self.actor_node_mut(id) {
+            Some(x) => x,
             None => return false,
         };
-        let slot = match self.tree.ivar(actor, iv) {
+        let slot = match tree.ivar(actor, iv) {
             Some(s) => s,
             None => return false,
         };
-        self.tree.set_fixnum(slot, v)
+        tree.set_fixnum(slot, v)
     }
 
     /// 角色经验。VXA 的 @exp 是 Hash{class_id => 经验}（转职后按职业分别存储），
     /// 部分游戏是直接整数。此处兼容两种。
     pub fn actor_exp(&self, id: u32) -> Option<i64> {
-        let actor = self.actor(id)?;
-        let e = self.tree.ivar(actor, "exp")?;
-        match self.tree.kind(e) {
+        let (tree, actor) = self.actor_node(id)?;
+        let e = tree.ivar(actor, "exp")?;
+        match tree.kind(e) {
             Kind::Hash { pairs, .. } => {
-                let class_id = self
-                    .tree
+                let class_id = tree
                     .ivar(actor, "class_id")
-                    .and_then(|c| self.tree.as_fixnum(c));
+                    .and_then(|c| tree.as_fixnum(c));
                 if let Some(cid) = class_id {
-                    if let Some(v) = self.tree.hash_get_int(e, cid) {
-                        if let Some(exp) = self.tree.as_fixnum(v) {
+                    if let Some(v) = tree.hash_get_int(e, cid) {
+                        if let Some(exp) = tree.as_fixnum(v) {
                             return Some(exp);
                         }
                     }
                 }
-                pairs.iter().find_map(|(_, v)| self.tree.as_fixnum(*v))
+                pairs.iter().find_map(|(_, v)| tree.as_fixnum(*v))
             }
-            _ => self.tree.as_fixnum(e),
+            _ => tree.as_fixnum(e),
         }
     }
 
     pub fn set_actor_exp(&mut self, id: u32, exp: i64) -> bool {
-        let actor = match self.actor(id) {
-            Some(a) => a,
+        let (tree, actor) = match self.actor_node_mut(id) {
+            Some(x) => x,
             None => return false,
         };
-        let e = match self.tree.ivar(actor, "exp") {
+        let e = match tree.ivar(actor, "exp") {
             Some(e) => e,
             None => return false,
         };
-        let is_hash = matches!(self.tree.kind(e), Kind::Hash { .. });
+        let is_hash = matches!(tree.kind(e), Kind::Hash { .. });
         if !is_hash {
-            return self.tree.set_fixnum(e, exp);
+            return tree.set_fixnum(e, exp);
         }
         // 哈希结构：更新/插入 @class_id 对应的经验
-        let class_id = self
-            .tree
+        let class_id = tree
             .ivar(actor, "class_id")
-            .and_then(|c| self.tree.as_fixnum(c));
-        let keys: Vec<(u32, i64)> = match self.tree.kind(e) {
+            .and_then(|c| tree.as_fixnum(c));
+        let keys: Vec<(u32, i64)> = match tree.kind(e) {
             Kind::Hash { pairs, .. } => pairs
                 .iter()
-                .map(|(k, _)| (*k, self.tree.as_fixnum(*k).unwrap_or(0)))
+                .map(|(k, _)| (*k, tree.as_fixnum(*k).unwrap_or(0)))
                 .collect(),
             _ => return false,
         };
@@ -506,15 +703,15 @@ impl SaveData {
             .or_else(|| if class_id.is_none() && !keys.is_empty() { Some(0) } else { None })
             .or_else(|| if keys.is_empty() { None } else { Some(0) });
         if let Some(p) = pos {
-            let v = match self.tree.kind(e) {
+            let v = match tree.kind(e) {
                 Kind::Hash { pairs, .. } => pairs[p].1,
                 _ => return false,
             };
-            return self.tree.set_fixnum(v, exp);
+            return tree.set_fixnum(v, exp);
         }
-        let key = self.tree.new_fixnum(class_id.unwrap_or(1));
-        let val = self.tree.new_fixnum(exp);
-        if let Kind::Hash { pairs, .. } = self.tree.kind_mut(e) {
+        let key = tree.new_fixnum(class_id.unwrap_or(1));
+        let val = tree.new_fixnum(exp);
+        if let Kind::Hash { pairs, .. } = tree.kind_mut(e) {
             pairs.push((key, val));
             return true;
         }
@@ -560,41 +757,61 @@ impl SaveData {
         Some(level)
     }
 
-    /// 角色装备数组 [武器, 盾, 头, 身, 饰品]（槽位 ID，0 = 无）
+    /// 角色装备数组 [武器, 盾, 头, 身, 饰品]（槽位 ID，0 = 无）。
+    /// VXA 用 @equips 数组；VX 用 @weapon_id / @armor1-4_id 独立字段。
     pub fn actor_equips(&self, id: u32) -> Vec<u32> {
-        let Some(actor) = self.actor(id) else { return vec![] };
-        let Some(e) = self.tree.ivar(actor, "equips") else { return vec![] };
-        let mut out = Vec::new();
-        if let Kind::Array(items) = self.tree.kind(e) {
-            for it in items {
-                out.push(self.tree.as_fixnum(*it).unwrap_or(0).max(0) as u32);
+        let Some((tree, actor)) = self.actor_node(id) else { return vec![] };
+        if let Some(e) = tree.ivar(actor, "equips") {
+            let mut out = Vec::new();
+            if let Kind::Array(items) = tree.kind(e) {
+                for it in items {
+                    out.push(tree.as_fixnum(*it).unwrap_or(0).max(0) as u32);
+                }
             }
+            return out;
+        }
+        // VX 风格：@weapon_id + @armor1_id..@armor4_id
+        let mut out = Vec::new();
+        for iv in ["weapon_id", "armor1_id", "armor2_id", "armor3_id", "armor4_id"] {
+            let v = tree
+                .ivar(actor, iv)
+                .and_then(|n| tree.as_fixnum(n))
+                .unwrap_or(0)
+                .max(0) as u32;
+            out.push(v);
         }
         out
     }
 
     pub fn set_actor_equip(&mut self, id: u32, slot: usize, item_id: u32) -> bool {
-        let actor = match self.actor(id) {
-            Some(a) => a,
+        let (tree, actor) = match self.actor_node_mut(id) {
+            Some(x) => x,
             None => return false,
         };
-        let e = match self.tree.ivar(actor, "equips") {
-            Some(e) => e,
-            None => return false,
-        };
-        let has_slot = match self.tree.kind(e) {
-            Kind::Array(items) => slot < items.len(),
-            _ => false,
-        };
-        if !has_slot {
+        if let Some(e) = tree.ivar(actor, "equips") {
+            let has_slot = match tree.kind(e) {
+                Kind::Array(items) => slot < items.len(),
+                _ => false,
+            };
+            if !has_slot {
+                return false;
+            }
+            let val = tree.new_fixnum(item_id as i64);
+            if let Kind::Array(items) = tree.kind_mut(e) {
+                items[slot] = val;
+                return true;
+            }
             return false;
         }
-        let val = self.tree.new_fixnum(item_id as i64);
-        if let Kind::Array(items) = self.tree.kind_mut(e) {
-            items[slot] = val;
-            return true;
-        }
-        false
+        // VX 风格：@weapon_id + @armor1_id..@armor4_id
+        let Some(iv) = ["weapon_id", "armor1_id", "armor2_id", "armor3_id", "armor4_id"]
+            .get(slot)
+            .copied()
+        else {
+            return false;
+        };
+        let Some(f) = tree.ivar(actor, iv) else { return false };
+        tree.set_fixnum(f, item_id as i64)
     }
 
     /// 角色参数修正值（加成）。
@@ -602,44 +819,44 @@ impl SaveData {
     /// 索引统一为 0=最大HP 1=最大MP 2=攻击 3=防御 4=魔法力 5=魔防 6=敏捷 7=运；
     /// VX/XP 只有 0..=4 与 6（魔法力对应 @spi_plus，无魔防/运）。
     pub fn actor_param_plus(&self, id: u32, idx: usize) -> Option<i64> {
-        let actor = self.actor(id)?;
-        if let Some(p) = self.tree.ivar(actor, "param_plus") {
-            if let Kind::Array(items) = self.tree.kind(p) {
-                return self.tree.as_fixnum(*items.get(idx)?);
+        let (tree, actor) = self.actor_node(id)?;
+        if let Some(p) = tree.ivar(actor, "param_plus") {
+            if let Kind::Array(items) = tree.kind(p) {
+                return tree.as_fixnum(*items.get(idx)?);
             }
             return None;
         }
         let name = param_plus_field(idx)?;
-        let f = self.tree.ivar(actor, name)?;
-        self.tree.as_fixnum(f)
+        let f = tree.ivar(actor, name)?;
+        tree.as_fixnum(f)
     }
 
     pub fn set_actor_param_plus(&mut self, id: u32, idx: usize, v: i64) -> bool {
-        let actor = match self.actor(id) {
-            Some(a) => a,
+        let (tree, actor) = match self.actor_node_mut(id) {
+            Some(x) => x,
             None => return false,
         };
-        if let Some(p) = self.tree.ivar(actor, "param_plus") {
+        if let Some(p) = tree.ivar(actor, "param_plus") {
             // VXA 数组风格（必要时扩展数组）
-            if !matches!(self.tree.kind(p), Kind::Array(_)) {
+            if !matches!(tree.kind(p), Kind::Array(_)) {
                 return false;
             }
-            let len = match self.tree.kind(p) {
+            let len = match tree.kind(p) {
                 Kind::Array(items) => items.len(),
                 _ => 0,
             };
             if idx >= len {
-                let pads: Vec<u32> = (len..=idx).map(|_| self.tree.new_fixnum(0)).collect();
-                if let Kind::Array(items) = self.tree.kind_mut(p) {
+                let pads: Vec<u32> = (len..=idx).map(|_| tree.new_fixnum(0)).collect();
+                if let Kind::Array(items) = tree.kind_mut(p) {
                     items.extend(pads);
                 }
             }
-            let node = match self.tree.kind(p) {
+            let node = match tree.kind(p) {
                 Kind::Array(items) => items.get(idx).copied(),
                 _ => None,
             };
             if let Some(node) = node {
-                return self.tree.set_fixnum(node, v);
+                return tree.set_fixnum(node, v);
             }
             return false;
         }
@@ -647,11 +864,11 @@ impl SaveData {
             Some(n) => n,
             None => return false,
         };
-        let f = match self.tree.ivar(actor, name) {
+        let f = match tree.ivar(actor, name) {
             Some(f) => f,
             None => return false,
         };
-        self.tree.set_fixnum(f, v)
+        tree.set_fixnum(f, v)
     }
 
     /// 角色技能列表
@@ -664,12 +881,12 @@ impl SaveData {
     }
 
     fn actor_id_array(&self, id: u32, iv: &str) -> Vec<u32> {
-        let Some(actor) = self.actor(id) else { return vec![] };
-        let Some(arr) = self.tree.ivar(actor, iv) else { return vec![] };
+        let Some((tree, actor)) = self.actor_node(id) else { return vec![] };
+        let Some(arr) = tree.ivar(actor, iv) else { return vec![] };
         let mut out = Vec::new();
-        if let Kind::Array(items) = self.tree.kind(arr) {
+        if let Kind::Array(items) = tree.kind(arr) {
             for it in items {
-                if let Some(v) = self.tree.as_fixnum(*it) {
+                if let Some(v) = tree.as_fixnum(*it) {
                     out.push(v as u32);
                 }
             }
@@ -679,26 +896,26 @@ impl SaveData {
 
     /// 添加技能/状态（去重）
     pub fn actor_add_id(&mut self, id: u32, iv: &str, item_id: u32) -> bool {
-        let actor = match self.actor(id) {
-            Some(a) => a,
+        let (tree, actor) = match self.actor_node_mut(id) {
+            Some(x) => x,
             None => return false,
         };
-        let arr = match self.tree.ivar(actor, iv) {
+        let arr = match tree.ivar(actor, iv) {
             Some(a) => a,
             None => return false,
         };
         let key = item_id as i64;
-        let exists = match self.tree.kind(arr) {
+        let exists = match tree.kind(arr) {
             Kind::Array(items) => {
-                items.iter().any(|it| self.tree.as_fixnum(*it) == Some(key))
+                items.iter().any(|it| tree.as_fixnum(*it) == Some(key))
             }
             _ => return false,
         };
         if exists {
             return true;
         }
-        let val = self.tree.new_fixnum(key);
-        if let Kind::Array(items) = self.tree.kind_mut(arr) {
+        let val = tree.new_fixnum(key);
+        if let Kind::Array(items) = tree.kind_mut(arr) {
             items.push(val);
             return true;
         }
@@ -706,24 +923,24 @@ impl SaveData {
     }
 
     pub fn actor_remove_id(&mut self, id: u32, iv: &str, item_id: u32) -> bool {
-        let actor = match self.actor(id) {
-            Some(a) => a,
+        let (tree, actor) = match self.actor_node_mut(id) {
+            Some(x) => x,
             None => return false,
         };
-        let arr = match self.tree.ivar(actor, iv) {
+        let arr = match tree.ivar(actor, iv) {
             Some(a) => a,
             None => return false,
         };
         let key = item_id as i64;
-        let old: Vec<u32> = match self.tree.kind(arr) {
+        let old: Vec<u32> = match tree.kind(arr) {
             Kind::Array(items) => items.to_vec(),
             _ => return false,
         };
         let keep: Vec<u32> = old
             .into_iter()
-            .filter(|it| self.tree.as_fixnum(*it) != Some(key))
+            .filter(|it| tree.as_fixnum(*it) != Some(key))
             .collect();
-        if let Kind::Array(items) = self.tree.kind_mut(arr) {
+        if let Kind::Array(items) = tree.kind_mut(arr) {
             *items = keep;
             return true;
         }
@@ -787,6 +1004,40 @@ fn seg_layout(tree: &Tree, engine: Engine) -> Option<Layout> {
         Kind::Array(items) => layout_from_array(tree, engine, items),
         Kind::Hash { pairs, .. } => layout_from_hash(tree, pairs),
         _ => None,
+    }
+}
+
+/// 扫描"每对象一段"的分段存档（常见 VX 自定义脚本存档）：
+/// 根对象类名为 Game_Switches / Game_Variables / Game_Actors / Game_Party 等时
+/// 按角色记录段位置。至少命中 3 个角色才启用。
+fn detect_seg_roles(segs: &[Tree]) -> Option<SegRoles> {
+    let mut r = SegRoles::default();
+    for (i, seg) in segs.iter().enumerate() {
+        let root = seg.root();
+        if root == rgss_marshal::NIL_NODE {
+            continue;
+        }
+        let (class, node) = match seg.kind(root) {
+            Kind::Object { class, .. } => (seg.sym_bytes(*class), root),
+            _ => continue,
+        };
+        match class {
+            b"Game_Switches" => r.switches = Some((i, node)),
+            b"Game_Variables" => r.variables = Some((i, node)),
+            b"Game_Actors" => r.actors = Some((i, node)),
+            b"Game_Party" => r.party = Some((i, node)),
+            b"Game_System" => r.system = Some((i, node)),
+            _ => {}
+        }
+    }
+    let found = [r.switches.is_some(), r.variables.is_some(), r.actors.is_some(), r.party.is_some()]
+        .iter()
+        .filter(|b| **b)
+        .count();
+    if found >= 3 {
+        Some(r)
+    } else {
+        None
     }
 }
 
@@ -1112,5 +1363,100 @@ mod tests {
         assert!(save.set_actor_level_sync(1, 5, &[]));
         assert_eq!(save.actor_stat(1, "level"), Some(5));
         assert_eq!(save.actor_exp(1), Some(999_999_999));
+    }
+
+    // ------------------------------------------------------------------
+    // VX 分段存档（RMVX_test/Save1.rvdata：14 段独立对象格式）
+    // ------------------------------------------------------------------
+
+    fn vx_fixture() -> SaveData {
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../RMVX_test/Save1.rvdata");
+        SaveData::open(&p).expect("VX 分段存档打开失败")
+    }
+
+    #[test]
+    fn vx_segmented_layout() {
+        let save = vx_fixture();
+        assert!(save.layout.is_none(), "分段存档不应命中阵列布局");
+        assert!(save.seg_roles.is_some(), "应识别分段对象布局");
+        let roles = save.seg_roles.as_ref().unwrap();
+        assert!(roles.switches.is_some());
+        assert!(roles.variables.is_some());
+        assert!(roles.actors.is_some());
+        assert!(roles.party.is_some());
+        // 14 段全保留
+        let total = save.tail_before.len() + 1 + save.tail_after.len();
+        assert_eq!(total, 14);
+        // 开关/变量/角色/金钱可读
+        assert!(save.switch_array_len() > 0);
+        assert!(save.variable_array_len() > 0);
+        assert!(save.actor_ids().len() >= 1);
+        assert!(save.gold().is_some());
+        let members = save.party_member_ids();
+        assert!(!members.is_empty());
+    }
+
+    #[test]
+    fn vx_segmented_edits() {
+        let mut save = vx_fixture();
+        let bytes = {
+            let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../RMVX_test/Save1.rvdata");
+            std::fs::read(&p).unwrap()
+        };
+        // 编辑开关/变量/金钱/角色
+        assert!(save.set_switch(5, true));
+        assert_eq!(save.switch(5), Some(true));
+        assert!(save.set_variable(3, 777));
+        assert_eq!(save.variable(3), Some(777));
+        let gold0 = save.gold().unwrap();
+        assert!(save.set_gold(gold0 + 50));
+        assert_eq!(save.gold(), Some(gold0 + 50));
+        // 编辑角色
+        let first = save.actor_ids()[0];
+        assert!(save.set_actor_stat(first, "level", 42));
+        assert_eq!(save.actor_stat(first, "level"), Some(42));
+        assert!(save.add_inventory(InvKind::Item, 1, 1));
+        // 全部角色访问器在分段存档下不 panic、可读写（回归：actor_equips 曾误用主树）
+        assert!(save.actor_name(first).is_some());
+        let _ = save.actor_exp(first);
+        let _ = save.actor_param_plus(first, 2);
+        assert!(save.set_actor_param_plus(first, 2, 5));
+        assert_eq!(save.actor_param_plus(first, 2), Some(5));
+        let _ = save.actor_equips(first);
+        assert!(save.set_actor_equip(first, 0, 7));
+        assert_eq!(save.actor_equips(first)[0], 7);
+        let _ = save.actor_skills(first);
+        let _ = save.actor_states(first);
+        assert!(save.actor_add_id(first, "skills", 99));
+        assert!(save.actor_skills(first).contains(&99));
+        assert!(save.actor_remove_id(first, "skills", 99));
+        assert!(save.rename_actor(first, "改名测试"));
+        assert_eq!(save.actor_name(first).as_deref(), Some("改名测试"));
+        // 往返：dump 后重新解析仍可用，且未编辑段字节不变
+        let out = save.dump_bytes();
+        let s2 = SaveData::from_bytes(&out, save.engine).expect("重解析");
+        assert_eq!(s2.switch(5), Some(true));
+        assert_eq!(s2.variable(3), Some(777));
+        assert_eq!(s2.gold(), Some(gold0 + 50));
+        assert_eq!(s2.actor_stat(first, "level"), Some(42));
+        // 整段字节级对比：只允许 Game_Switches/Game_Variables/Game_Party/Game_Actors 段变化
+        let a = rgss_marshal::parse_multi(&bytes).unwrap();
+        let b = rgss_marshal::parse_multi(&out).unwrap();
+        assert_eq!(a.len(), b.len());
+        for (i, (ta, tb)) in a.iter().zip(b.iter()).collect::<Vec<_>>().iter().enumerate() {
+            let ba = rgss_marshal::dump(ta);
+            let bb = rgss_marshal::dump(tb);
+            if ba != bb {
+                let class = match ta.kind(ta.root()) {
+                    Kind::Object { class, .. } => String::from_utf8_lossy(ta.sym_bytes(*class)).into_owned(),
+                    _ => format!("段{i}"),
+                };
+                assert!(
+                    matches!(class.as_str(), "Game_Switches" | "Game_Variables" | "Game_Party" | "Game_Actors"),
+                    "未编辑段 {class} 不应变化"
+                );
+            }
+        }
     }
 }

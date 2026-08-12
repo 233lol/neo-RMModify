@@ -1,9 +1,20 @@
 //! 角色标签页：属性、装备、技能、状态编辑
 
 use egui::{Color32, RichText};
-use rgss_save::SaveData;
 
 use crate::app::App;
+use crate::save_view::SaveView;
+
+/// 角色显示名：存档名（默认名哨兵时为空）→ 数据库名 → "角色 N"
+fn actor_display_name(save: &SaveView, db: Option<&rgss_db::Database>, id: u32) -> String {
+    save.actor_name(id)
+        .or_else(|| {
+            db.and_then(|d| d.actor_name(id))
+                .filter(|n| !n.is_empty())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| format!("角色 {id}"))
+}
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let App {
@@ -46,9 +57,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             if !member_ids.is_empty() {
                 let member_names: Vec<String> = member_ids
                     .iter()
-                    .map(|id| {
-                        save.actor_name(*id).unwrap_or_else(|| format!("角色 {id}"))
-                    })
+                    .map(|id| actor_display_name(save, db, *id))
                     .collect();
                 ui.weak(format!("成员: {}", member_names.join("、")));
             }
@@ -64,9 +73,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 }
                 for id in all_ids {
                     let is_member = member_ids.contains(&id);
-                    let name = save
-                        .actor_name(id)
-                        .unwrap_or_else(|| format!("角色 {id}"));
+                    let name = actor_display_name(save, db, id);
                     let label = if is_member {
                         RichText::new(format!("{name}  [队伍]")).color(Color32::from_rgb(60, 140, 230))
                     } else {
@@ -91,7 +98,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
 
 fn show_actor_detail(
     ui: &mut egui::Ui,
-    save: &mut SaveData,
+    save: &mut SaveView,
     db: Option<&rgss_db::Database>,
     actor_id: u32,
     dirty: &mut bool,
@@ -103,33 +110,42 @@ fn show_actor_detail(
         return;
     }
 
-    // 存档中的名字（可能被改名）
-    let save_name = save.actor_name(actor_id).unwrap_or_else(|| format!("角色 {actor_id}"));
+    // 存档中的名字（可能被改名；2000 默认名哨兵时无存档名）
+    let save_name = save.actor_name(actor_id);
     let db_name = db
         .and_then(|d| d.actor_name(actor_id))
+        .map(str::to_string)
         .unwrap_or_default();
+    // 显示名：存档名 → 数据库名 → "角色 N"
+    let display_name = save_name
+        .clone()
+        .or_else(|| (!db_name.is_empty()).then(|| db_name.clone()))
+        .unwrap_or_else(|| format!("角色 {actor_id}"));
     ui.heading(format!(
         "{}  (ID {actor_id}){}",
-        save_name,
-        if !db_name.is_empty() && db_name != save_name {
-            format!("  —— 数据库名: {db_name}")
+        display_name,
+        if let Some(sn) = &save_name {
+            if !db_name.is_empty() && db_name != *sn {
+                format!("  —— 数据库名: {db_name}")
+            } else {
+                String::new()
+            }
         } else {
             String::new()
         }
     ));
     ui.separator();
 
-    // 角色改名
+    // 角色改名（初始值用显示名，便于从数据库名继续编辑）
     ui.horizontal(|ui| {
         ui.label("姓名:");
-        let mut name_buf = save_name.clone();
+        let mut name_buf = display_name.clone();
         if ui
             .text_edit_singleline(&mut name_buf)
             .changed()
             && !name_buf.is_empty()
         {
-            if let Some(n) = save.tree.ivar(actor_node(save, actor_id), "name") {
-                save.tree.set_utf8_string(n, &name_buf);
+            if save.rename_actor(actor_id, &name_buf) {
                 *dirty = true;
             }
         }
@@ -250,25 +266,9 @@ fn show_actor_detail(
     show_states(ui, save, db, actor_id, dirty, state_search);
 }
 
-fn actor_node(save: &SaveData, actor_id: u32) -> u32 {
-    save.layout
-        .as_ref()
-        .and_then(|l| l.actors)
-        .and_then(|a| save.tree.ivar(a, "data"))
-        .and_then(|h| match save.tree.kind(h) {
-            rgss_marshal::Kind::Hash { pairs, .. } => pairs
-                .iter()
-                .find(|(k, _)| matches!(save.tree.kind(*k), rgss_marshal::Kind::Fixnum(f) if *f == actor_id as i64))
-                .map(|(_, v)| *v),
-            rgss_marshal::Kind::Array(items) => items.get(actor_id as usize).copied(),
-            _ => None,
-        })
-        .unwrap_or(0)
-}
-
 fn show_equips(
     ui: &mut egui::Ui,
-    save: &mut SaveData,
+    save: &mut SaveView,
     db: Option<&rgss_db::Database>,
     actor_id: u32,
     dirty: &mut bool,
@@ -342,7 +342,7 @@ fn armor_names(db: Option<&rgss_db::Database>) -> Vec<(u32, String)> {
 /// 技能列表（数据库全量 + 存档持有，checkbox 勾选即拥有）
 fn show_skills(
     ui: &mut egui::Ui,
-    save: &mut SaveData,
+    save: &mut SaveView,
     db: Option<&rgss_db::Database>,
     actor_id: u32,
     dirty: &mut bool,
@@ -465,7 +465,7 @@ fn show_skills(
 /// 状态列表（数据库全量 + 存档持有，checkbox 勾选即生效）
 fn show_states(
     ui: &mut egui::Ui,
-    save: &mut SaveData,
+    save: &mut SaveView,
     db: Option<&rgss_db::Database>,
     actor_id: u32,
     dirty: &mut bool,

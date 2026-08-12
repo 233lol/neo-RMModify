@@ -1,0 +1,7 @@
+[package]
+name = "rgss-lcf"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+encoding_rs = "0.8"

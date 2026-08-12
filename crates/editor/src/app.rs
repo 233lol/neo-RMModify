@@ -4,12 +4,14 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use egui::{Color32, RichText};
-use rgss_db::{Database, Engine};
+use rgss_db::Database;
 use rgss_save::{InvKind, SaveData};
+
+use crate::save_view::SaveView;
 
 pub struct App {
     pub db: Option<Database>,
-    pub save: Option<SaveData>,
+    pub save: Option<SaveView>,
     pub game_dir: Option<PathBuf>,
     pub status: String,
     pub status_color: Color32,
@@ -105,34 +107,37 @@ impl App {
     }
 
     pub fn open_save(&mut self) {
-        let engine = self.db.as_ref().map(|d| d.engine).unwrap_or(Engine::VxAce);
-        let ext = engine.save_ext();
+        // 全部引擎的存档扩展名都放行，按实际文件后缀分派解析器
         let mut dialog = rfd::FileDialog::new().set_title("打开存档文件");
-        dialog = dialog.add_filter(engine.label(), &[ext]);
+        dialog = dialog.add_filter(
+            "RPG Maker 存档 (*.rvdata2;*.rvdata;*.rxdata;*.lsd)",
+            &["rvdata2", "rvdata", "rxdata", "lsd"],
+        );
         if let Some(dir) = &self.game_dir {
             dialog = dialog.set_directory(dir);
         }
         if let Some(path) = dialog.pick_file() {
-            match SaveData::open(&path) {
+            let is_lsd = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.eq_ignore_ascii_case("lsd"))
+                .unwrap_or(false);
+            let opened = if is_lsd {
+                rgss_save::lcf::SaveLsd::open(&path)
+                    .map(SaveView::Lsd)
+            } else {
+                SaveData::open(&path).map(SaveView::Marshal)
+            };
+            match opened {
                 Ok(save) => {
-                    let note = save.note.clone().unwrap_or_default();
+                    let note = save.note().unwrap_or_default();
                     self.save = Some(save);
                     self.sel_actor = None;
                     self.raw_path.clear();
                     self.inv_selected.clear();
                     self.dirty = false;
-                    // 未加载数据库时，从存档所在目录自动查找游戏并加载名称
-                    let mut auto_info = String::new();
-                    if self.db.is_none() {
-                        if let Some(game_dir) = rgss_db::find_game_dir(&path) {
-                            if let Ok(db) = Database::load(&game_dir) {
-                                let info = db.info();
-                                self.game_dir = Some(game_dir);
-                                self.db = Some(db);
-                                auto_info = format!("已自动加载游戏数据库（{info}）。");
-                            }
-                        }
-                    }
+                    // 总是从存档所在目录自动定位游戏：打开其他游戏的存档时切换数据库
+                    let auto_info = self.auto_load_db_from_save(&path);
                     self.set_status(
                         format!(
                             "已打开存档: {}{}{}",
@@ -144,6 +149,40 @@ impl App {
                     );
                 }
                 Err(e) => self.set_error(format!("打开存档失败: {e}")),
+            }
+        }
+    }
+
+    /// 从存档所在目录自动定位游戏并切换数据库；返回状态描述。
+    /// 打开其他游戏的存档时会覆盖 game_dir/db（原来只在 db 为空时加载）。
+    pub fn auto_load_db_from_save(&mut self, path: &Path) -> String {
+        let Some(game_dir) = rgss_db::find_game_dir(path) else {
+            return if self.db.is_none() {
+                "未找到游戏目录，名称可能显示为 ID。".to_string()
+            } else {
+                String::new()
+            };
+        };
+        let switched = self.game_dir.as_deref() != Some(game_dir.as_path());
+        match Database::load(&game_dir) {
+            Ok(db) => {
+                let info = db.info();
+                self.game_dir = Some(game_dir);
+                self.db = Some(db);
+                if switched {
+                    format!("已自动切换游戏数据库（{info}）。")
+                } else {
+                    format!("已自动加载游戏数据库（{info}）。")
+                }
+            }
+            Err(e) => {
+                if self.db.is_none() {
+                    format!("自动加载数据库失败: {e}。")
+                } else if switched {
+                    format!("检测到新游戏目录但数据库加载失败（{e}），仍使用原数据库。")
+                } else {
+                    String::new()
+                }
             }
         }
     }
@@ -167,7 +206,7 @@ impl App {
             self.set_error("尚未打开存档");
             return;
         };
-        let Some(path) = save.path.clone() else {
+        let Some(path) = save.path().cloned() else {
             self.set_error("存档无路径");
             return;
         };
@@ -201,7 +240,7 @@ impl App {
         let save_name = self
             .save
             .as_ref()
-            .and_then(|s| s.path.as_ref())
+            .and_then(|s| s.path())
             .and_then(|p| p.file_name())
             .map(|f| f.to_string_lossy().into_owned());
         let has_save = self.save.is_some();
@@ -253,7 +292,7 @@ impl App {
                     ui.add_space(120.0);
                     ui.label(RichText::new("RPG Maker 存档编辑器").size(34.0).strong());
                     ui.add_space(10.0);
-                    ui.label("支持 VX Ace / VX / XP");
+                    ui.label("支持 VX Ace / VX / XP / 2000 / 2003");
                     ui.add_space(20.0);
                     if ui.button("选择游戏目录").clicked() {
                         self.open_game_dir();

@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod save_view;
 mod ui_actors;
 mod ui_inventory;
 mod ui_raw;

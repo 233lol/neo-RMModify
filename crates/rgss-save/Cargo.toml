@@ -5,4 +5,6 @@ edition.workspace = true
 
 [dependencies]
 rgss-marshal = { path = "../rgss-marshal" }
+rgss-lcf = { path = "../rgss-lcf" }
 rgss-db = { path = "../rgss-db" }
+encoding_rs = "0.8"

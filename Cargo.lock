@@ -402,6 +402,7 @@ dependencies = [
  "egui",
  "rfd",
  "rgss-db",
+ "rgss-lcf",
  "rgss-marshal",
  "rgss-save",
 ]
@@ -505,6 +506,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "60b4d19daeb47a1e42e9e67fdc8dd003364b4d3e6c6bc4df865a2b5ad2c920e0"
 dependencies = [
  "bytemuck",
+]
+
+[[package]]
+name = "encoding_rs"
+version = "0.8.35"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75030f3c4f45dafd7586dd6780965a8c7e8e285a5ecb86713e63a79c5b2766f3"
+dependencies = [
+ "cfg-if",
 ]
 
 [[package]]
@@ -1701,7 +1711,15 @@ dependencies = [
 name = "rgss-db"
 version = "0.1.0"
 dependencies = [
+ "rgss-lcf",
  "rgss-marshal",
+]
+
+[[package]]
+name = "rgss-lcf"
+version = "0.1.0"
+dependencies = [
+ "encoding_rs",
 ]
 
 [[package]]
@@ -1716,7 +1734,9 @@ dependencies = [
 name = "rgss-save"
 version = "0.1.0"
 dependencies = [
+ "encoding_rs",
  "rgss-db",
+ "rgss-lcf",
  "rgss-marshal",
 ]
 

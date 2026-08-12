@@ -247,6 +247,15 @@ fn to_json(tree: &Tree, idx: u32, depth: usize) -> String {
     if depth > 24 {
         return "\"...\"".into();
     }
+    if idx == rgss_marshal::NIL_NODE {
+        return "null".into();
+    }
+    if idx == rgss_marshal::TRUE_NODE {
+        return "true".into();
+    }
+    if idx == rgss_marshal::FALSE_NODE {
+        return "false".into();
+    }
     match tree.kind(idx) {
         Nil => "null".into(),
         True => "true".into(),

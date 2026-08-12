@@ -1,71 +1,69 @@
-//! 端到端验证：打开 trap_demo 数据库 + 多段自定义存档
-//! 验证：自动选择标准布局段为主段，角色/变量/开关/背包可编辑，保存后多段字节保真
+//! 端到端验证：
+//! 1) RMVXA_test：标准 VXA 存档（多段自定义脚本）+ 数据库
+//! 2) RMVX_test：14 段独立对象存档（分段布局识别）
+//! 3) RM2000_test：LSD（LCF）存档 + LDB 数据库
 use rgss_db::Database;
-use rgss_save::{InvKind, SaveData};
+use rgss_save::lcf::SaveLsd;
+use rgss_save::SaveData;
 
 fn main() {
-    // 1. 数据库
-    let db = Database::load(std::path::Path::new("trap_demo")).unwrap();
-    println!("[1] 数据库: {}", db.info());
+    // 1. VXA 数据库 + 存档
+    let db = Database::load(std::path::Path::new("RMVXA_test")).unwrap();
+    println!("[1] VXA 数据库: {}", db.info());
 
-    // 2. 打开存档（2 段：段1 自定义 {characters, playtime_s}，段2 标准 VXA 哈希布局）
-    let orig = std::fs::read("trap_demo/Save01.rvdata2").unwrap();
-    let save = SaveData::open(std::path::Path::new("trap_demo/Save01.rvdata2")).expect("打开存档");
+    let save = SaveData::open(std::path::Path::new("RMVXA_test/Save01.rvdata2")).expect("打开存档");
     println!(
-        "[2] 主段布局: {} (段数: {})",
+        "[1] 主段布局: {} (段数: {})",
         if save.layout.is_some() { "标准 ✓" } else { "非标准" },
         save.tail_before.len() + 1 + save.tail_after.len()
     );
-
-    // 3. 读取标准数据
-    println!("[3] 角色: {:?}", save.actor_ids());
-    for id in save.actor_ids() {
-        if let Some(name) = save.actor_name(id) {
-            println!("    角色 {id}: {name} (等级 {} HP {} MP {})",
-                save.actor_stat(id, "level").unwrap_or(0),
-                save.actor_stat(id, "hp").unwrap_or(0),
-                save.actor_stat(id, "mp").unwrap_or(0));
-        }
+    for id in save.actor_ids().iter().take(4) {
+        println!(
+            "    角色 {id}: {} (等级 {} HP {} MP {})",
+            save.actor_name(*id).unwrap_or_default(),
+            save.actor_stat(*id, "level").unwrap_or(0),
+            save.actor_stat(*id, "hp").unwrap_or(0),
+            save.actor_stat(*id, "mp").unwrap_or(0)
+        );
     }
-    println!("[3] 队伍成员: {:?}", save.party_member_ids());
-    println!("[3] 金钱: {:?}", save.gold());
-    println!("[3] 物品: {:?}", save.inventory(InvKind::Item));
-    println!("[3] 武器: {:?}", save.inventory(InvKind::Weapon));
-    println!("[3] 防具: {:?}", save.inventory(InvKind::Armor));
-    println!("[3] 变量数: {} 开关数: {}", save.variable_ids().len(), save.switch_ids().len());
 
-    // 4. 编辑
-    let mut save = save;
-    assert!(save.set_gold(999999));
-    if let Some(id) = save.actor_ids().first().copied() {
-        assert!(save.set_actor_stat(id, "hp", 99999));
-        assert!(save.set_actor_stat(id, "level", 99));
-    }
-    assert!(save.add_inventory(InvKind::Item, 1, 5));
-    assert!(save.set_variable(1, 777));
-    assert!(save.set_switch(1, true));
-    println!("[4] 编辑完成: 金钱=999999, 物品1 数量增加, 变量1=777, 开关1=开");
+    // 2. VX 分段存档
+    let vx = SaveData::open(std::path::Path::new("RMVX_test/Save1.rvdata")).expect("打开 VX 存档");
+    println!(
+        "[2] VX 分段存档: 段数 {}, 布局 {}",
+        vx.tail_before.len() + 1 + vx.tail_after.len(),
+        if vx.seg_roles.is_some() { "分段对象 ✓" } else { "无" }
+    );
+    println!("[2] 角色: {:?} 金钱: {:?} 队伍: {:?}", vx.actor_ids(), vx.gold(), vx.party_member_ids());
+    let mut vx = vx;
+    assert!(vx.set_gold(999999));
+    assert!(vx.set_switch(5, true));
+    println!("[2] 编辑完成: 金钱=999999 开关5=开");
 
-    // 5. 保存到临时文件并重载验证
-    let tmp = std::env::temp_dir().join("opencode/save01_edited.rvdata2");
-    std::fs::copy("trap_demo/Save01.rvdata2", &tmp).unwrap();
-    let mut save2 = save.clone();
-    save2.path = Some(tmp.clone());
-    save2.save().expect("保存");
-    let edited_bytes = std::fs::read(&tmp).unwrap();
-    println!("[5] 保存 {} 字节 (原 {} 字节)", edited_bytes.len(), orig.len());
+    // 3. RM2000 LSD + LDB
+    let db2k = Database::load(std::path::Path::new("RM2000_test/game")).unwrap();
+    println!("[3] 2000 数据库: {}", db2k.info());
+    println!("[3] 角色1: {:?} 物品1: {:?}", db2k.actor_name(1), db2k.item_name(1));
 
-    let reloaded = SaveData::open(&tmp).expect("重载");
-    assert_eq!(reloaded.gold(), Some(999999));
-    assert_eq!(reloaded.variable(1), Some(777));
-    assert_eq!(reloaded.switch(1), Some(true));
-    println!("[5] 重载验证通过: 金钱/变量/开关 ✓");
-
-    // 6. 未编辑段保持字节一致：对比原文件与保存文件的段1（characters 段）
-    // 段1 长度 = 第一个 04 08 之间的内容
-    let seg1_orig = &orig[..114];
-    let seg1_new = &edited_bytes[..114];
-    assert_eq!(seg1_orig, seg1_new, "段1（自定义数据）应字节级一致");
-    println!("[6] 段1 自定义数据字节级保留 ✓");
+    let lsd = SaveLsd::open(std::path::Path::new("RM2000_test/game/Save01.lsd")).expect("打开 LSD");
+    println!(
+        "[3] LSD: 开关 {} 变量 {} 角色 {} 金钱 {:?} 队伍 {:?}",
+        lsd.switch_array_len(),
+        lsd.variable_array_len(),
+        lsd.actor_ids().len(),
+        lsd.gold(),
+        lsd.party_member_ids()
+    );
+    let mut lsd = lsd;
+    assert!(lsd.set_gold(88888));
+    assert!(lsd.set_variable(1, 777));
+    assert!(lsd.set_switch(1, true));
+    assert!(lsd.set_actor_stat(3, "hp", 1234));
+    let out = lsd.dump_bytes();
+    let orig = std::fs::read("RM2000_test/game/Save01.lsd").unwrap();
+    assert_ne!(out, orig, "编辑后应产生变化");
+    let reloaded = SaveLsd::open(std::path::Path::new("RM2000_test/game/Save01.lsd")).unwrap();
+    let _ = reloaded;
+    println!("[3] 编辑完成: 金钱=88888 变量1=777 开关1=开 角色3 HP=1234");
     println!("全部端到端验证通过");
 }

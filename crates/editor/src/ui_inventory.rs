@@ -1,9 +1,10 @@
 //! 物品 / 武器 / 防具标签页：背包列表 + 按名称批量添加
 
 use egui::{Color32, RichText};
-use rgss_save::{InvKind, SaveData};
+use rgss_save::InvKind;
 
 use crate::app::App;
+use crate::save_view::SaveView;
 
 /// 测试钩子：记录上一帧渲染的 数量输入框 / 删除按钮 屏幕位置（仅测试用）
 #[cfg(test)]
@@ -13,6 +14,9 @@ pub(crate) mod test_hooks {
             const { std::cell::RefCell::new(Vec::new()) };
         pub(crate) static TEST_DELETE_RECTS: std::cell::RefCell<Vec<egui::Rect>> =
             const { std::cell::RefCell::new(Vec::new()) };
+        /// 批量添加面板是否渲染（上一帧）
+        pub(crate) static TEST_BATCH_SHOWN: std::cell::RefCell<bool> =
+            const { std::cell::RefCell::new(false) };
     }
 }
 
@@ -32,15 +36,29 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let Some(save) = save.as_mut() else { return };
     let db = db.as_ref();
 
+    // 2000/2003 无武器/防具分类
+    let is_2000 = matches!(save.engine(), rgss_db::Engine::Rm2000 | rgss_db::Engine::Rm2003);
+    if is_2000 {
+        *inv_tab = InvKind::Item;
+    }
     ui.horizontal(|ui| {
         ui.selectable_value(inv_tab, InvKind::Item, "物品");
-        ui.selectable_value(inv_tab, InvKind::Weapon, "武器");
-        ui.selectable_value(inv_tab, InvKind::Armor, "防具");
+        if !is_2000 {
+            ui.selectable_value(inv_tab, InvKind::Weapon, "武器");
+            ui.selectable_value(inv_tab, InvKind::Armor, "防具");
+        }
     });
     ui.add_space(4.0);
 
-    // 背包列表
+    // 背包列表（限制高度 + 滚动，保证下方批量添加面板始终可见）
     let inv = save.inventory(*inv_tab);
+    let mut scroll_h = inv.len() as f32 * 22.0 + 40.0;
+    scroll_h = scroll_h.clamp(90.0, 340.0);
+    egui::ScrollArea::vertical()
+        .id_salt("inv_list_scroll")
+        .max_height(scroll_h)
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
     egui::Grid::new("inv_grid")
         .striped(true)
         .min_col_width(60.0)
@@ -83,6 +101,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 ui.end_row();
             }
         });
+        });
 
     ui.add_space(12.0);
     ui.separator();
@@ -123,7 +142,7 @@ fn item_extra(db: Option<&rgss_db::Database>, kind: InvKind, id: u32) -> String 
 #[allow(clippy::too_many_arguments)]
 fn batch_add_panel(
     ui: &mut egui::Ui,
-    save: &mut SaveData,
+    save: &mut SaveView,
     db: Option<&rgss_db::Database>,
     inv_tab: &mut InvKind,
     inv_search: &mut String,
@@ -137,6 +156,8 @@ fn batch_add_panel(
         ui.heading("批量添加");
         ui.weak("按名称搜索并选择要添加到背包的物品（无需输入 ID）");
     });
+    #[cfg(test)]
+    crate::ui_inventory::test_hooks::TEST_BATCH_SHOWN.with(|r| *r.borrow_mut() = true);
 
     let entries = match db {
         Some(d) => match *inv_tab {
@@ -145,7 +166,36 @@ fn batch_add_panel(
             InvKind::Armor => &d.armors,
         },
         None => {
-            ui.weak("未加载游戏数据库，无法按名称添加（请先打开游戏目录）");
+            // 未加载数据库时仍可添加：直接按 ID 输入（各引擎一致）
+            ui.weak("未加载游戏数据库，无法按名称搜索；可直接输入 ID 添加：");
+            ui.horizontal(|ui| {
+                ui.label("ID:");
+                let mut id = inv_search.parse::<i64>().unwrap_or(1).max(1);
+                if ui
+                    .add(egui::DragValue::new(&mut id).range(1..=99_999).speed(1.0))
+                    .changed()
+                {
+                    *inv_search = id.to_string();
+                }
+                ui.label("数量:");
+                let mut q = *inv_batch_qty;
+                if ui
+                    .add(egui::DragValue::new(&mut q).range(1..=999).speed(1.0))
+                    .changed()
+                {
+                    *inv_batch_qty = q;
+                }
+                let btn = egui::Button::new(
+                    RichText::new(format!("添加 {} 到背包", inv_tab.label())).color(Color32::WHITE),
+                )
+                .fill(Color32::from_rgb(60, 140, 80));
+                if ui.add(btn).clicked() {
+                    save.add_inventory(*inv_tab, id as u32, q);
+                    *dirty = true;
+                    *status = format!("已添加 {}(ID {id}) × {q}", inv_tab.label());
+                    *status_color = Color32::from_rgb(40, 160, 80);
+                }
+            });
             return;
         }
     };

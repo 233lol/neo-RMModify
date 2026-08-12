@@ -1,4 +1,4 @@
-//! 原始数据标签页：通用 Marshal 树浏览与编辑（兜底模式）
+//! 原始数据标签页：通用 Marshal 树浏览与编辑（兜底模式）＋ LCF（2000/2003）结构视图
 //!
 //! 非标准布局的存档（自定义脚本）也能在这里编辑任意节点。
 
@@ -6,10 +6,23 @@ use egui::RichText;
 use rgss_marshal::Kind;
 
 use crate::app::App;
+use crate::save_view::SaveView;
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let App { save, raw_path, dirty, .. } = app;
     let Some(save) = save.as_mut() else { return };
+    match save {
+        SaveView::Marshal(s) => show_marshal(s, ui, raw_path, dirty),
+        SaveView::Lsd(s) => show_lcf(s, ui, dirty),
+    }
+}
+
+fn show_marshal(
+    save: &mut rgss_save::SaveData,
+    ui: &mut egui::Ui,
+    raw_path: &mut Vec<u32>,
+    dirty: &mut bool,
+) {
     let tree = &mut save.tree;
     let root = tree.root();
 
@@ -43,6 +56,130 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     // 当前节点编辑区
     edit_node(tree, ui, cur, &mut path, dirty);
     *raw_path = path;
+}
+
+/// LCF（RPG2000/2003）结构视图：chunk → 字段。整数字段可编辑。
+fn show_lcf(save: &mut rgss_save::lcf::SaveLsd, ui: &mut egui::Ui, dirty: &mut bool) {
+    use rgss_lcf::{LcfPayload, LcfValue};
+    ui.heading("原始数据");
+    ui.weak("LCF 结构（RPG2000/2003）：文件 = 头字符串 + chunk 流。谨慎操作！");
+    ui.add_space(4.0);
+
+    // 先用不可变借用构建显示模型，避免与后续编辑的 &mut 借用冲突
+    enum Row {
+        ChunkRaw { id: u32, len: usize },
+        ChunkFields { id: u32, n: usize },
+        ChunkArray { id: u32, count: u32 },
+        Field { id: u32, text: String, editable_int: bool },
+        ElemField { id: u32, text: String },
+        Elem { id: u32 },
+    }
+    struct Model {
+        rows: Vec<Row>,
+        int_slots: Vec<(u32, u32)>, // (chunk, field) 可编辑整数
+    }
+    let mut model = Model { rows: Vec::new(), int_slots: Vec::new() };
+    for chunk in &save.doc.chunks {
+        match &chunk.payload {
+            LcfPayload::Raw(b) => {
+                model.rows.push(Row::ChunkRaw { id: chunk.id, len: b.len() });
+            }
+            LcfPayload::Fields(fields) => {
+                model.rows.push(Row::ChunkFields { id: chunk.id, n: fields.len() });
+                for f in fields {
+                    let (text, editable) = match &f.typed {
+                        Some(LcfValue::Int(v)) => (format!("整数 {v}"), true),
+                        Some(LcfValue::Str(s)) => {
+                            (format!("字符串 {:?}", rgss_lcf::decode_text(s)), false)
+                        }
+                        Some(LcfValue::I16(v)) => (format!("int16[{}]", v.len()), false),
+                        Some(LcfValue::U8(v)) => (format!("字节[{}]", v.len()), false),
+                        Some(LcfValue::I32(v)) => (format!("int32[{}]", v.len()), false),
+                        Some(LcfValue::Double(d)) => (format!("浮点 {d}"), false),
+                        None => ("未解析".to_string(), false),
+                    };
+                    if editable {
+                        model.int_slots.push((chunk.id, f.id));
+                    }
+                    model.rows.push(Row::Field { id: f.id, text, editable_int: editable });
+                }
+            }
+            LcfPayload::StructArray { count, elements } => {
+                model.rows.push(Row::ChunkArray { id: chunk.id, count: *count });
+                for el in elements.iter().take(20) {
+                    model.rows.push(Row::Elem { id: el.id });
+                    for f in el.fields.iter().take(12) {
+                        let text = match &f.typed {
+                            Some(LcfValue::Int(v)) => format!("整数 {v}"),
+                            Some(LcfValue::Str(s)) => {
+                                format!("字符串 {:?}", rgss_lcf::decode_text(s))
+                            }
+                            Some(LcfValue::I16(v)) => format!("int16[{}]", v.len()),
+                            Some(LcfValue::U8(v)) => format!("字节[{}]", v.len()),
+                            Some(LcfValue::I32(v)) => format!("int32[{}]", v.len()),
+                            Some(LcfValue::Double(d)) => format!("浮点 {d}"),
+                            None => "未解析".to_string(),
+                        };
+                        model.rows.push(Row::ElemField { id: f.id, text });
+                    }
+                }
+                if elements.len() > 20 {
+                    model.rows.push(Row::ChunkArray { id: u32::MAX, count: 0 });
+                }
+            }
+        }
+    }
+
+    // 渲染（可编辑整数行按 int_slots 顺序匹配）
+    let mut slot_i = 0usize;
+    for row in &model.rows {
+        match row {
+            Row::ChunkRaw { id, len } => {
+                ui.label(RichText::new(format!("chunk 0x{id:02X}（未解析，{len} 字节）")).monospace());
+            }
+            Row::ChunkFields { id, n } => {
+                ui.label(RichText::new(format!("chunk 0x{id:02X}（{n} 字段）")).strong().monospace());
+            }
+            Row::ChunkArray { id, count } => {
+                if *id == u32::MAX {
+                    ui.weak("…共多条记录（只显示前 20 条）");
+                } else {
+                    ui.label(RichText::new(format!("chunk 0x{id:02X}（{count} 条记录）")).strong().monospace());
+                }
+            }
+            Row::Elem { id } => {
+                ui.label(RichText::new(format!("  记录 ID {id}")).monospace());
+            }
+            Row::ElemField { id, text } => {
+                ui.horizontal(|ui| {
+                    ui.add_space(6.0);
+                    ui.monospace(format!("0x{id:02X}"));
+                    ui.label(text);
+                });
+            }
+            Row::Field { id, text, editable_int } => {
+                ui.horizontal(|ui| {
+                    ui.monospace(format!("0x{id:02X}"));
+                    if *editable_int {
+                        let (cid, fid) = model.int_slots[slot_i];
+                        slot_i += 1;
+                        let cur = save.doc.int_field(cid, fid).unwrap_or(0);
+                        let mut val = cur;
+                        if ui
+                            .add(egui::DragValue::new(&mut val).range(i64::MIN..=i64::MAX).speed(1.0))
+                            .changed()
+                        {
+                            save.doc.set_int_field(cid, fid, val);
+                            *dirty = true;
+                        }
+                        ui.weak("整数");
+                    } else {
+                        ui.label(text);
+                    }
+                });
+            }
+        }
+    }
 }
 
 fn node_label(tree: &rgss_marshal::Tree, idx: u32) -> String {

@@ -173,10 +173,7 @@ impl Database {
             "无法识别游戏版本：目录中未找到 Game.rvproj2 / Game.rvproj / Game.rxproj / RPG_RT.ini".to_string()
         })?;
         if !engine.is_marshal() {
-            return Err(format!(
-                "RPG Maker {} 使用 LCF 格式，支持将在后续版本提供",
-                engine.label()
-            ));
+            return load_lcf(engine, game_dir);
         }
         let mut db = Database {
             engine,
@@ -298,6 +295,106 @@ impl Database {
     }
 }
 
+/// 加载 RPG Maker 2000/2003 的 LDB 数据库名称。
+///
+/// LDB = "LcfDataBase" 头 + chunk 流（liblcf ldb/chunks.h 编号）：
+/// 0x0B 角色 / 0x0C 技能 / 0x0D 物品 / 0x12 状态 / 0x15 术语 / 0x16 系统 /
+/// 0x17 开关名 / 0x18 变量名（2003）/ 0x1E 职业（2003）。
+/// 2000 无武器/防具/职业；变量名只有 2003 有。
+fn load_lcf(engine: Engine, game_dir: &Path) -> Result<Database, String> {
+    let mut db = Database {
+        engine,
+        game_dir: game_dir.to_path_buf(),
+        ..Default::default()
+    };
+    let ldb_path = game_dir.join("RPG_RT.ldb");
+    let bytes = match std::fs::read(&ldb_path) {
+        Ok(b) => b,
+        Err(e) => {
+            return Err(format!("缺少 RPG_RT.ldb 数据库: {e}"));
+        }
+    };
+    let doc = rgss_lcf::parse(&bytes).map_err(|e| format!("RPG_RT.ldb 解析失败: {e}"))?;
+    if doc.header != rgss_lcf::HEADER_LDB {
+        return Err("RPG_RT.ldb 头无效".to_string());
+    }
+
+    // 通用：从结构体数组 chunk 提取 (id, name, description)
+    let entries = |chunk_id: u32, db: &mut Database, field: &str| -> Vec<DbEntry> {
+        let mut out = Vec::new();
+        out.push(DbEntry { id: 0, name: String::new(), extra: String::new(), icon: String::new() });
+        let Some(chunk) = doc.chunk(chunk_id) else {
+            db.warnings.push(format!("LDB 缺少 chunk 0x{chunk_id:x}（{field}）"));
+            return out;
+        };
+        let rgss_lcf::LcfPayload::Raw(payload) = &chunk.payload else {
+            return out;
+        };
+        match rgss_lcf::ldb_entry_texts(payload) {
+            Ok(list) => {
+                for (id, name, desc) in list {
+                    let name = name
+                        .as_deref()
+                        .map(rgss_lcf::decode_text)
+                        .unwrap_or_default();
+                    let extra = desc
+                        .as_deref()
+                        .map(rgss_lcf::decode_text)
+                        .unwrap_or_default();
+                    out.push(DbEntry { id, name, extra, icon: String::new() });
+                }
+            }
+            Err(e) => {
+                db.warnings.push(format!("LDB chunk 0x{chunk_id:x}（{field}）解析失败: {e}"));
+            }
+        }
+        out
+    };
+
+    db.actors = entries(0x0B, &mut db, "actors");
+    db.skills = entries(0x0C, &mut db, "skills");
+    db.items = entries(0x0D, &mut db, "items");
+    db.states = entries(0x12, &mut db, "states");
+    // 2000/2003 无武器/防具数据库
+    db.weapons.push(DbEntry { id: 0, name: String::new(), extra: String::new(), icon: String::new() });
+    db.armors.push(DbEntry { id: 0, name: String::new(), extra: String::new(), icon: String::new() });
+    if matches!(engine, Engine::Rm2003) {
+        db.classes = entries(0x1E, &mut db, "classes");
+    } else {
+        db.classes.push(DbEntry { id: 0, name: String::new(), extra: String::new(), icon: String::new() });
+    }
+
+    // 开关名（0x17，2000/2003 都有）
+    db.switches.push(String::new());
+    if let Some(chunk) = doc.chunk(0x17) {
+        if let rgss_lcf::LcfPayload::Raw(payload) = &chunk.payload {
+            if let Ok(list) = rgss_lcf::ldb_entry_texts(payload) {
+                db.switches.extend(
+                    list.into_iter()
+                        .map(|(_, n, _)| n.as_deref().map(rgss_lcf::decode_text).unwrap_or_default()),
+                );
+            }
+        }
+    }
+    // 变量名（0x18；2000 无变量名）
+    db.variables.push(String::new());
+    if matches!(engine, Engine::Rm2003) {
+        if let Some(chunk) = doc.chunk(0x18) {
+            if let rgss_lcf::LcfPayload::Raw(payload) = &chunk.payload {
+                if let Ok(list) = rgss_lcf::ldb_entry_texts(payload) {
+                    db.variables.extend(
+                        list.into_iter()
+                            .map(|(_, n, _)| n.as_deref().map(rgss_lcf::decode_text).unwrap_or_default()),
+                    );
+                }
+            }
+        }
+    }
+
+    // 2000/2003 无职业经验表（经验曲线在角色身上）
+    Ok(db)
+}
+
 fn parse_data(path: &Path) -> Result<Tree, String> {
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
     rgss_marshal::parse(&bytes).map_err(|e| e.to_string())
@@ -407,5 +504,44 @@ mod tests {
         assert!(exp_table_from_params(&[0, 20, 30, 30]).is_none()); // 无经验曲线
         assert!(exp_table_from_params(&[30, 20]).is_none()); // 参数不足
         assert!(exp_table_from_params(&[]).is_none());
+    }
+
+    #[test]
+    fn load_rm2000_ldb() {
+        use super::{detect_engine, Database};
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../RM2000_test/game");
+        assert_eq!(detect_engine(&dir), Some(super::Engine::Rm2000));
+        let db = Database::load(&dir).expect("LDB 加载失败");
+        assert_eq!(db.engine, super::Engine::Rm2000);
+        // 角色：第一个名字应为 "战士"（GBK）
+        assert_eq!(db.actor_name(1).map(str::to_string), Some("战士".to_string()));
+        assert!(db.actors.len() >= 130, "应有 130 个角色，实际 {}", db.actors.len());
+        // 开关名（1200 个）
+        assert!(db.switches.len() >= 1000, "应有开关名，实际 {}", db.switches.len());
+        assert!(db.switches[1..].iter().any(|s| !s.is_empty()), "开关名应有内容");
+        // 2000 无武器/防具/职业/变量名
+        assert_eq!(db.weapons.len(), 1);
+        assert_eq!(db.armors.len(), 1);
+        assert_eq!(db.classes.len(), 1);
+        assert_eq!(db.variables.len(), 1);
+        // 物品
+        assert!(db.items.len() > 1);
+        assert!(db.items[1..].iter().any(|i| !i.name.is_empty()));
+    }
+
+    #[test]
+    fn load_vx_db() {
+        use super::{detect_engine, Database};
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../RMVX_test");
+        assert_eq!(detect_engine(&dir), Some(super::Engine::Vx));
+        let db = Database::load(&dir).expect("VX 数据库加载失败");
+        assert_eq!(db.engine, super::Engine::Vx);
+        assert!(db.actors.len() >= 2);
+        assert!(db.items.len() > 1);
+        assert!(db.weapons.len() > 1);
+        assert!(db.switches.len() >= 2);
+        assert!(db.variables.len() >= 2);
+        // VX 名称应为 UTF-8（Ruby 1.8 无编码 ivar，纯字节）
+        assert!(db.actors[1].name.contains('a') || db.actors[1].name.chars().any(|c| c as u32 > 0x7F));
     }
 }
