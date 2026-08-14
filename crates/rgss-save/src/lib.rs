@@ -1482,6 +1482,46 @@ mod tests {
         SaveData::open(&p).expect("VX 分段存档打开失败")
     }
 
+    /// RMXP_test（To the Moon）：12 段拼接存档，段 3-11 为 Game_* 对象
+    /// （VX 风格"每对象一段"布局，XP 引擎下也能自动识别）
+    #[test]
+    fn xp_multipart_save_roundtrip() {
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../RMXP_test/save1.rxdata");
+        if !p.exists() {
+            eprintln!("跳过：缺少夹具 {p:?}");
+            return;
+        }
+        let bytes = std::fs::read(&p).unwrap();
+        let save = SaveData::open(&p).expect("XP 存档打开失败");
+        assert_eq!(save.engine, Engine::Xp);
+        let total = save.tail_before.len() + 1 + save.tail_after.len();
+        assert_eq!(total, 12, "XP 存档应为 12 段");
+        assert!(save.layout.is_none(), "非阵列布局不应命中阵列布局");
+        assert!(save.seg_roles.is_some(), "应识别分段对象布局");
+        assert!(save.note.is_some(), "分段格式应有提示");
+        // 开关/变量/角色可读（走分段对象路由）
+        assert!(save.switch_array_len() > 0);
+        assert!(save.variable_array_len() > 0);
+        let ids = save.actor_ids();
+        assert!(ids.len() >= 1);
+        assert!(save.actor_name(ids[0]).is_some(), "XP 角色名应可读");
+        // 往返：未编辑时字节一致
+        let out = save.dump_bytes();
+        assert_eq!(out, bytes, "未编辑的 XP 存档往返应字节一致");
+        // 编辑后重解析仍可用且段落保留
+        let mut save = save;
+        assert!(save.set_switch(5, true));
+        assert_eq!(save.switch(5), Some(true));
+        assert!(save.set_variable(3, 777));
+        assert_eq!(save.variable(3), Some(777));
+        let out2 = save.dump_bytes();
+        assert_ne!(out2, bytes, "编辑后应产生变化");
+        let s2 = SaveData::from_bytes(&out2, Engine::Xp).expect("重解析");
+        assert_eq!(s2.tail_before.len() + 1 + s2.tail_after.len(), 12);
+        assert_eq!(s2.switch(5), Some(true));
+        assert_eq!(s2.variable(3), Some(777));
+    }
+
     #[test]
     fn vx_segmented_layout() {
         let save = vx_fixture();

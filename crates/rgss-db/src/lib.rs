@@ -99,6 +99,19 @@ pub fn detect_engine(game_dir: &Path) -> Option<Engine> {
             return Some(Engine::Rm2000);
         }
     }
+    // 已发布/加密的游戏（无项目文件、无明文 Data，如 mkxp 版）：
+    // 按 Game.ini 的 Library 行判断（RGSS102E=XP、RGSS2xx=VX、RGSS3xx=VXA）
+    if let Ok(ini) = std::fs::read_to_string(game_dir.join("Game.ini")) {
+        if ini.contains("RGSS300") {
+            return Some(Engine::VxAce);
+        }
+        if ini.contains("RGSS200") {
+            return Some(Engine::Vx);
+        }
+        if ini.contains("RGSS100") || ini.contains("RGSS101") || ini.contains("RGSS102") {
+            return Some(Engine::Xp);
+        }
+    }
     None
 }
 
@@ -543,5 +556,17 @@ mod tests {
         assert!(db.variables.len() >= 2);
         // VX 名称应为 UTF-8（Ruby 1.8 无编码 ivar，纯字节）
         assert!(db.actors[1].name.contains('a') || db.actors[1].name.chars().any(|c| c as u32 > 0x7F));
+    }
+
+    /// RMXP_test（To the Moon，mkxp 版）：无项目文件/明文 Data，靠 Game.ini 判 XP
+    #[test]
+    fn detect_rmxp_via_game_ini() {
+        use super::detect_engine;
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../RMXP_test");
+        if !dir.exists() {
+            eprintln!("跳过：缺少夹具 {dir:?}");
+            return;
+        }
+        assert_eq!(detect_engine(&dir), Some(super::Engine::Xp));
     }
 }

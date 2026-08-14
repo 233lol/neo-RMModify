@@ -2,6 +2,7 @@
 //! 1) RMVXA_test：标准 VXA 存档（多段自定义脚本）+ 数据库
 //! 2) RMVX_test：14 段独立对象存档（分段布局识别）
 //! 3) RM2000_test：LSD（LCF）存档 + LDB 数据库
+//! 4) RMXP_test：XP 加密游戏（To the Moon）的 12 段分段存档 + RGSSAD v1 加密包解包
 use rgss_db::Database;
 use rgss_save::lcf::SaveLsd;
 use rgss_save::SaveData;
@@ -65,5 +66,39 @@ fn main() {
     let reloaded = SaveLsd::open(std::path::Path::new("RM2000_test/game/Save01.lsd")).unwrap();
     let _ = reloaded;
     println!("[3] 编辑完成: 金钱=88888 变量1=777 开关1=开 角色3 HP=1234");
+
+    // 4. RMXP 加密游戏（To the Moon，mkxp 版）：分段存档 + RGSSAD v1 加密包
+    let xp = SaveData::open(std::path::Path::new("RMXP_test/save1.rxdata")).expect("打开 XP 存档");
+    println!(
+        "[4] XP 分段存档: 段数 {} 布局 {} 引擎 {:?}",
+        xp.tail_before.len() + 1 + xp.tail_after.len(),
+        if xp.seg_roles.is_some() { "分段对象 ✓" } else { "无" },
+        xp.engine
+    );
+    println!(
+        "[4] 角色: {:?} 开关 {} 变量 {}",
+        xp.actor_ids(),
+        xp.switch_array_len(),
+        xp.variable_array_len()
+    );
+    let mut xp = xp;
+    assert!(xp.set_switch(5, true));
+    assert!(xp.set_variable(3, 777));
+    println!("[4] 编辑完成: 开关5=开 变量3=777");
+
+    // 5. XP 加密包（RGSSAD v1）
+    let pkg = std::path::Path::new("RMXP_test/To the Moon.rgssad");
+    if pkg.exists() {
+        let bytes = std::fs::read(pkg).unwrap();
+        let arch = rgss_marshal::rgss3a::Archive::parse(&bytes).expect("解析 RGSSAD v1");
+        println!("[5] RGSSAD v{}: {} 个文件", arch.version, arch.entries().len());
+        let idx = arch.entries().iter().position(|e| e.path == "Data/Actors.rxdata").unwrap();
+        let unpacked = arch.unpack_entry(idx).unwrap();
+        let tree = rgss_marshal::parse(&unpacked).expect("解包出的 Actors.rxdata 应可解析");
+        assert!(tree.ivar(tree.root(), "name").is_some() || tree.node_count() > 10);
+        println!("[5] 解包验证通过: Data/Actors.rxdata ({} 字节, {} 节点)", unpacked.len(), tree.node_count());
+    } else {
+        println!("[5] 跳过（缺少夹具 RMXP_test/To the Moon.rgssad）");
+    }
     println!("全部端到端验证通过");
 }

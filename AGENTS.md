@@ -2,7 +2,7 @@
 
 Rust workspace: RPG Maker VX Ace / VX / XP / 2000 / 2003 save-file editor. All code comments and UI strings are Chinese — keep them that way. Layered crates (dependency direction only):
 
-- `crates/rgss-marshal` — Ruby Marshal 4.8 parser/serializer + RGSSAD/RGSS2A/RGSS3A 加密包解包（`rgss3a` 模块，格式与 mkxp rgssad.cpp 一致；v1/v2 未实测，v3 有 RMVXA_test 夹具）(no GUI deps)
+- `crates/rgss-marshal` — Ruby Marshal 4.8 parser/serializer + RGSSAD/RGSS2A/RGSS3A 加密包解包（`rgss3a` 模块，格式与 mkxp rgssad.cpp 一致；v1 有 RMXP_test 夹具、v3 有 RMVXA_test 夹具，v2 仅手工构造测试）(no GUI deps)
 - `crates/rgss-lcf` — LCF container (LSD/LDB, RPG2000/2003) parser/serializer (no GUI deps; `encoding_rs` for GBK/Shift-JIS display)
 - `crates/rgss-db` — engine detection + database name extraction (Marshal 与 LDB 两套)
 - `crates/rgss-save` — save-file editing API（`SaveData` = Marshal；`lcf::SaveLsd` = LSD）
@@ -49,9 +49,9 @@ Rust workspace: RPG Maker VX Ace / VX / XP / 2000 / 2003 save-file editor. All c
 
 ## Fixtures & gotchas
 
-- `RMVXA_test/`（VX Ace，2 段存档）、`RMVX_test/`（VX，14 段独立对象存档）、`RM2000_test/game/`（2000，三份 LSD + LDB）都是 gitignore 的真实游戏，改动不可恢复。
+- `RMVXA_test/`（VX Ace，2 段存档）、`RMVX_test/`（VX，14 段独立对象存档）、`RM2000_test/game/`（2000，三份 LSD + LDB）、`RMXP_test/`（XP，《To the Moon》mkxp 版，save1/save4.rxdata 12 段分段存档 + `To the Moon.rgssad` 加密包）都是 gitignore 的真实游戏，改动不可恢复。
 - 2000/2003 的 LSD 是标准 LCF（"LcfSaveData"）格式；`rework/` 里 RMModify 的 "@checksum" LSD 文档与夹具不符，仅作逆向历史参考。2003 无夹具，按 liblcf 字段表实现但未经实测。
 - 2000 角色存档存的是能力**修正值**（hp_mod 等），LDB 无武器/防具/职业/变量名；经验曲线在角色身上（无 class_exps）。
 - Release profile uses `opt-level = "s"` + `lto = true` + `panic = "abort"` → slow builds; use debug for iteration.
-- Engine detection keys: `Game.rvproj2` = VX Ace, `Game.rvproj` = VX, `Game.rxproj` = XP, `RPG_RT.ini` = 2000/2003（ini 含 "2003" 判 2003）。
+- Engine detection keys: `Game.rvproj2` = VX Ace, `Game.rvproj` = VX, `Game.rxproj` = XP, `RPG_RT.ini` = 2000/2003（ini 含 "2003" 判 2003）。已发布/加密游戏（无项目文件）看 `Game.ini` 的 `Library=RGSS10x` = XP / `RGSS2xx` = VX / `RGSS3xx` = VXA（mkxp 版如 RMXP_test 只靠这个）。
 - Repo has no commits or CI yet; don't assume a CI gate.

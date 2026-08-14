@@ -347,4 +347,42 @@ mod tests {
         let plain = std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../RMVXA_test/Data/Actors.rvdata2")).unwrap();
         assert_eq!(unpacked, plain, "解包出的 Actors.rvdata2 应与明文副本一致");
     }
+
+    /// 真实夹具：RMXP_test/To the Moon.rgssad（XP 完整游戏，gitignore）。
+    /// 无明文副本可比，用「解包出的 Data/Actors.rxdata 能被 Marshal 解析且含角色名」验证解密正确。
+    #[test]
+    fn fixture_v1_unpacks_real_game() {
+        let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../RMXP_test/To the Moon.rgssad");
+        if !p.exists() {
+            eprintln!("跳过：缺少夹具 {p:?}");
+            return;
+        }
+        let bytes = std::fs::read(&p).unwrap();
+        let arch = Archive::parse(&bytes).expect("解析真实 To the Moon.rgssad");
+        assert_eq!(arch.version, 1);
+        assert!(arch.entries().len() > 500, "XP 游戏应有大量文件，实际 {}", arch.entries().len());
+        // 路径规范化为 '/' 且含子目录
+        let idx = arch
+            .entries()
+            .iter()
+            .position(|e| e.path == "Data/Actors.rxdata")
+            .expect("应有 Data/Actors.rxdata");
+        let unpacked = arch.unpack_entry(idx).expect("解密 Data/Actors.rxdata");
+        // 解密产物必须是合法 Marshal：根为 RPG::Actor 数组（To the Moon 有 11 个角色槽）
+        let tree = crate::parse(&unpacked).expect("解包出的 Actors.rxdata 应是合法 Marshal");
+        let root = tree.root();
+        let kind = tree.kind(root).clone();
+        match &kind {
+            crate::Kind::Array(items) => {
+                assert!(items.len() > 10, "Actors 数组应有 11 个元素");
+            }
+            _ => panic!("Actors 根应为数组，实际 {kind:?}"),
+        }
+        // 抽查角色 1 的名字（Dr. Eva Rosalene）
+        if let crate::Kind::Array(items) = tree.kind(root) {
+            let actor = items[1];
+            let name = tree.ivar(actor, "name").and_then(|n| tree.as_string(n));
+            assert_eq!(name.as_deref(), Some("Dr. Eva Rosalene"), "XP 解密后角色名应可读");
+        }
+    }
 }

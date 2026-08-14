@@ -1869,6 +1869,67 @@ mod tests {
         assert_eq!(s2.variable_node(3).map(|(_, n)| n), Some(rgss_marshal::NIL_NODE));
     }
 
+    /// XP（To the Moon，mkxp 版）：打开 12 段分段存档，各页渲染不崩溃、变量可编辑
+    #[test]
+    fn xp_save_pages_render() {
+        let p = std::path::Path::new("../../RMXP_test/save1.rxdata");
+        if !p.exists() {
+            eprintln!("跳过：缺少夹具 {p:?}");
+            return;
+        }
+        let ctx = egui::Context::default();
+        crate::app::load_cn_font(&ctx);
+        let mut app = App {
+            db: None,
+            save: Some(SaveView::Marshal(
+                SaveData::open(p).expect("打开 XP 存档"),
+            )),
+            game_dir: None,
+            status: String::new(),
+            status_color: egui::Color32::GRAY,
+            tab: Tab::Raw,
+            dirty: false,
+            sel_actor: None,
+            inv_tab: InvKind::Item,
+            inv_search: String::new(),
+            inv_selected: Default::default(),
+            inv_batch_qty: 1,
+            var_search: String::new(),
+            sw_search: String::new(),
+            skill_search: String::new(),
+            state_search: String::new(),
+            last_error: None,
+        };
+        // 逐页渲染（角色/物品/变量/开关/原始数据）
+        for tab in [Tab::Actors, Tab::Inventory, Tab::Variables, Tab::Switches, Tab::Raw] {
+            app.tab = tab;
+            for _ in 0..2 {
+                run_frame(&ctx, &mut app, Vec::new());
+            }
+        }
+        // 分段识别：变量/开关/角色可读
+        let SaveView::Marshal(s) = app.save.as_ref().unwrap() else { unreachable!() };
+        assert!(s.seg_roles.is_some());
+        assert!(s.variable_array_len() > 0);
+        assert!(!s.actor_ids().is_empty());
+        // 变量页拖拽编辑变量 2（从当前值起步）后写回
+        app.tab = Tab::Variables;
+        crate::ui_raw::test_hooks::TEST_VALUE_RECTS.with(|r| r.borrow_mut().clear());
+        run_frame(&ctx, &mut app, Vec::new());
+        let rects = crate::ui_raw::test_hooks::TEST_VALUE_RECTS.with(|r| r.borrow().clone());
+        assert!(!rects.is_empty(), "变量页应渲染输入框");
+        let before = match app.save.as_ref().unwrap() {
+            SaveView::Marshal(s) => s.variable(1),
+            SaveView::Lsd(_) => None,
+        };
+        drag_by(&ctx, &mut app, rects[0].center(), 30.0);
+        let after = match app.save.as_ref().unwrap() {
+            SaveView::Marshal(s) => s.variable(1),
+            SaveView::Lsd(_) => None,
+        };
+        assert_ne!(before, after, "变量 1 应可编辑");
+    }
+
     /// 原始数据页（2000）：角色数组 chunk 0x6C 全量显示全部记录，整数字段可编辑
     #[test]
     fn lsd_raw_tab_shows_all_actor_records_and_edits() {
