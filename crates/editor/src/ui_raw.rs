@@ -130,22 +130,37 @@ fn container_row(
 }
 
 fn show_marshal(save: &mut rgss_save::SaveData, ui: &mut egui::Ui, dirty: &mut bool) {
-    let tree = &mut save.tree;
-    let root = tree.root();
-
     ui.heading("原始数据");
     ui.weak("通用 Marshal 树（JSON 式展开视图）：节点行内可直接编辑数值。谨慎操作！");
     ui.add_space(4.0);
 
-    let mut dummy_remove = false;
-    let mut path = Vec::new();
+    // 多段存档（VX 自定义脚本常见）：按文件顺序逐段渲染根对象
+    let seg_count = save.tail_before.len() + 1 + save.tail_after.len();
     egui::ScrollArea::both()
         .id_salt("raw_tree")
         .auto_shrink([false, false])
         .show(ui, |ui| {
-            render_child_row(
-                tree, ui, 0, "根".to_string(), root, dirty, &mut dummy_remove, &mut path, false,
-            );
+            if seg_count > 1 {
+                ui.weak(format!("多段存档：共 {seg_count} 段，按文件顺序显示（每段一个 Marshal 根对象）。"));
+                ui.add_space(4.0);
+            }
+            for si in 0..seg_count {
+                // 每段包一层唯一 id：各段节点索引独立，避免折叠状态跨段串扰
+                ui.push_id(("seg", si), |ui| {
+                    let mut dummy_remove = false;
+                    let mut path = Vec::new();
+                    let tree = save.seg_tree_mut(si);
+                    let root = tree.root();
+                    let key = if seg_count > 1 {
+                        format!("第 {} 段", si + 1)
+                    } else {
+                        "根".to_string()
+                    };
+                    render_child_row(
+                        tree, ui, 0, key, root, dirty, &mut dummy_remove, &mut path, false,
+                    );
+                });
+            }
         });
 }
 
@@ -567,12 +582,13 @@ fn show_lcf(save: &mut rgss_save::lcf::SaveLsd, ui: &mut egui::Ui, dirty: &mut b
         ChunkFields { id: u32, n: usize },
         ChunkArray { id: u32, count: u32 },
         Field { id: u32, text: String, editable_int: bool },
-        ElemField { id: u32, text: String },
+        ElemField { id: u32, text: String, editable_int: bool },
         Elem { id: u32 },
     }
     struct Model {
         rows: Vec<Row>,
-        int_slots: Vec<(u32, u32)>, // (chunk, field) 可编辑整数
+        // (chunk, 元素 ID[仅结构体数组], 字段) 可编辑整数
+        int_slots: Vec<(u32, Option<u32>, u32)>,
     }
     let mut model = Model { rows: Vec::new(), int_slots: Vec::new() };
     for chunk in &save.doc.chunks {
@@ -595,41 +611,48 @@ fn show_lcf(save: &mut rgss_save::lcf::SaveLsd, ui: &mut egui::Ui, dirty: &mut b
                         None => ("未解析".to_string(), false),
                     };
                     if editable {
-                        model.int_slots.push((chunk.id, f.id));
+                        model.int_slots.push((chunk.id, None, f.id));
                     }
                     model.rows.push(Row::Field { id: f.id, text, editable_int: editable });
                 }
             }
             LcfPayload::StructArray { count, elements } => {
                 model.rows.push(Row::ChunkArray { id: chunk.id, count: *count });
-                for el in elements.iter().take(20) {
+                // 全部元素、全部字段（角色数据量大，但须可完整查看与编辑）
+                for el in elements {
                     model.rows.push(Row::Elem { id: el.id });
-                    for f in el.fields.iter().take(12) {
-                        let text = match &f.typed {
-                            Some(LcfValue::Int(v)) => format!("整数 {v}"),
+                    for f in &el.fields {
+                        let (text, editable) = match &f.typed {
+                            Some(LcfValue::Int(v)) => (format!("整数 {v}"), true),
                             Some(LcfValue::Str(s)) => {
-                                format!("字符串 {:?}", rgss_lcf::decode_text(s))
+                                (format!("字符串 {:?}", rgss_lcf::decode_text(s)), false)
                             }
-                            Some(LcfValue::I16(v)) => format!("int16[{}]", v.len()),
-                            Some(LcfValue::U8(v)) => format!("字节[{}]", v.len()),
-                            Some(LcfValue::I32(v)) => format!("int32[{}]", v.len()),
-                            Some(LcfValue::Double(d)) => format!("浮点 {d}"),
-                            None => "未解析".to_string(),
+                            Some(LcfValue::I16(v)) => (format!("int16[{}]", v.len()), false),
+                            Some(LcfValue::U8(v)) => (format!("字节[{}]", v.len()), false),
+                            Some(LcfValue::I32(v)) => (format!("int32[{}]", v.len()), false),
+                            Some(LcfValue::Double(d)) => (format!("浮点 {d}"), false),
+                            None => ("未解析".to_string(), false),
                         };
-                        model.rows.push(Row::ElemField { id: f.id, text });
+                        if editable {
+                            model.int_slots.push((chunk.id, Some(el.id), f.id));
+                        }
+                        model.rows
+                            .push(Row::ElemField { id: f.id, text, editable_int: editable });
                     }
-                }
-                if elements.len() > 20 {
-                    model.rows.push(Row::ChunkArray { id: u32::MAX, count: 0 });
                 }
             }
         }
     }
 
-    // 渲染（可编辑整数行按 int_slots 顺序匹配）
-    let mut slot_i = 0usize;
-    for row in &model.rows {
-        match row {
+    // 渲染（可编辑整数行按 int_slots 顺序匹配）。
+    // 记录全量较多（角色数组 130 条），必须用滚动区，否则窗口外的行看不到
+    egui::ScrollArea::both()
+        .id_salt("raw_lcf")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            let mut slot_i = 0usize;
+            for row in &model.rows {
+                match row {
             Row::ChunkRaw { id, len } => {
                 ui.label(RichText::new(format!("chunk 0x{id:02X}（未解析，{len} 字节）")).monospace());
             }
@@ -637,34 +660,62 @@ fn show_lcf(save: &mut rgss_save::lcf::SaveLsd, ui: &mut egui::Ui, dirty: &mut b
                 ui.label(RichText::new(format!("chunk 0x{id:02X}（{n} 字段）")).strong().monospace());
             }
             Row::ChunkArray { id, count } => {
-                if *id == u32::MAX {
-                    ui.weak("…共多条记录（只显示前 20 条）");
-                } else {
-                    ui.label(RichText::new(format!("chunk 0x{id:02X}（{count} 条记录）")).strong().monospace());
-                }
+                ui.label(RichText::new(format!("chunk 0x{id:02X}（{count} 条记录）")).strong().monospace());
             }
             Row::Elem { id } => {
                 ui.label(RichText::new(format!("  记录 ID {id}")).monospace());
             }
-            Row::ElemField { id, text } => {
+            Row::ElemField { id, text, editable_int } => {
                 ui.horizontal(|ui| {
                     ui.add_space(6.0);
                     ui.monospace(format!("0x{id:02X}"));
-                    ui.label(text);
+                    if *editable_int {
+                        let (cid, eid, fid) = model.int_slots[slot_i];
+                        slot_i += 1;
+                        let cur = save
+                            .doc
+                            .element_field(cid, eid.expect("结构体数组整数槽应有元素 ID"), fid)
+                            .and_then(|f| f.typed.as_ref())
+                            .and_then(|t| t.as_int())
+                            .unwrap_or(0);
+                        let mut val = cur;
+                        let resp = ui
+                            .add(
+                                egui::DragValue::new(&mut val)
+                                    .range(i64::MIN..=i64::MAX)
+                                    .speed(1.0),
+                            );
+                        #[cfg(test)]
+                        crate::ui_raw::test_hooks::TEST_VALUE_RECTS
+                            .with(|r| r.borrow_mut().push(resp.rect));
+                        if resp.changed() {
+                            save.doc.set_int_element_field(cid, eid.unwrap(), fid, val);
+                            *dirty = true;
+                        }
+                        ui.weak("整数");
+                    } else {
+                        ui.label(text);
+                    }
                 });
             }
             Row::Field { id, text, editable_int } => {
                 ui.horizontal(|ui| {
                     ui.monospace(format!("0x{id:02X}"));
                     if *editable_int {
-                        let (cid, fid) = model.int_slots[slot_i];
+                        let (cid, _, fid) = model.int_slots[slot_i];
                         slot_i += 1;
                         let cur = save.doc.int_field(cid, fid).unwrap_or(0);
                         let mut val = cur;
-                        if ui
-                            .add(egui::DragValue::new(&mut val).range(i64::MIN..=i64::MAX).speed(1.0))
-                            .changed()
-                        {
+                        let resp = ui
+                            .add(
+                                egui::DragValue::new(&mut val)
+                                    .range(i64::MIN..=i64::MAX)
+                                    .speed(1.0),
+                            );
+                        #[cfg(test)]
+                        crate::ui_raw::test_hooks::TEST_VALUE_RECTS
+                            .with(|r| r.borrow_mut().push(resp.rect));
+                        if resp.changed() {
                             save.doc.set_int_field(cid, fid, val);
                             *dirty = true;
                         }
@@ -676,6 +727,7 @@ fn show_lcf(save: &mut rgss_save::lcf::SaveLsd, ui: &mut egui::Ui, dirty: &mut b
             }
         }
     }
+    });
 }
 
 /// 是否为容器节点（哨兵安全）
@@ -866,7 +918,17 @@ pub(crate) fn edit_leaf_value(
     dirty: &mut bool,
 ) -> (bool, Option<u32>) {
     if v == rgss_marshal::NIL_NODE {
-        ui.label(RichText::new("nil").weak());
+        // nil 值：提供整数输入框，输入即创建新 Fixnum 节点（由调用方写回父容器）。
+        // raw 页的 nil 有类型下拉（edit_child_value 拦截），这里只被变量页命中。
+        let mut val = 0i64;
+        let resp = ui
+            .add(egui::DragValue::new(&mut val).range(i64::MIN..=i64::MAX).speed(1.0));
+        #[cfg(test)]
+        crate::ui_raw::test_hooks::TEST_VALUE_RECTS.with(|r| r.borrow_mut().push(resp.rect));
+        if resp.changed() {
+            *dirty = true;
+            return (true, Some(tree.new_fixnum(val)));
+        }
         return (true, None);
     }
     if v == rgss_marshal::TRUE_NODE || v == rgss_marshal::FALSE_NODE {
@@ -944,7 +1006,11 @@ pub(crate) fn edit_leaf_value(
 }
 
 /// 叶子类型显示名（只读；哨兵安全）。变量页用。
+/// nil 显示「空」：数据是空值，但旁边输入框可直接输数字转为整数。
 pub(crate) fn leaf_type_label(tree: &rgss_marshal::Tree, v: u32) -> &'static str {
+    if v == rgss_marshal::NIL_NODE {
+        return "空";
+    }
     if let Some(t) = current_leaf_type(tree, v) {
         return t.name();
     }

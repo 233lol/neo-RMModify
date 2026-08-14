@@ -10,6 +10,8 @@
 use num_bigint::BigInt;
 use std::collections::HashMap;
 
+pub mod rgss3a;
+
 pub const MARSHAL_HEADER: [u8; 2] = [4, 8];
 
 // 哨兵节点索引（值类型，不代表 arena 节点）

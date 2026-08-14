@@ -150,8 +150,7 @@ impl App {
 
     /// 从存档所在目录自动定位游戏并切换数据库；返回状态描述。
     /// 打开其他游戏的存档时会覆盖 game_dir/db（原来只在 db 为空时加载）。
-    pub fn auto_load_db_from_save(&mut self, path: &Path) -> String {
-        let Some(game_dir) = rgss_db::find_game_dir(path) else {
+    pub fn auto_load_db_from_save(&mut self, path: &Path) -> String {        let Some(game_dir) = rgss_db::find_game_dir(path) else {
             return if self.db.is_none() {
                 "未找到游戏目录，名称可能显示为 ID。".to_string()
             } else {
@@ -179,6 +178,33 @@ impl App {
                     String::new()
                 }
             }
+        }
+    }
+
+    /// 解包 RGSS 加密包（Game.rgss3a / rgss2a / rgssad）到用户选择的目录
+    pub fn unpack_rgss_archive(&mut self) {
+        let Some(src) = rfd::FileDialog::new()
+            .set_title("选择加密包（Game.rgss3a / Game.rgss2a / Game.rgssad）")
+            .add_filter("RGSS 加密包 (*.rgss3a;*.rgss2a;*.rgssad)", &["rgss3a", "rgss2a", "rgssad"])
+            .pick_file()
+        else {
+            return;
+        };
+        let Some(out_dir) = rfd::FileDialog::new()
+            .set_title("选择解包输出目录")
+            .pick_folder()
+        else {
+            return;
+        };
+        match rgss_marshal::rgss3a::Archive::unpack_file(&src, &out_dir) {
+            Ok((ver, n, total)) => self.set_status(
+                format!(
+                    "已解包 v{ver} 加密包：{n} 个文件，共 {total} 字节 → {}",
+                    out_dir.display()
+                ),
+                true,
+            ),
+            Err(e) => self.set_error(e),
         }
     }
 
@@ -253,6 +279,10 @@ impl App {
                 }
                 if ui.add_enabled(has_save, egui::Button::new("另存为")).clicked() {
                     self.save_as();
+                }
+                ui.separator();
+                if ui.button("解包加密包").clicked() {
+                    self.unpack_rgss_archive();
                 }
                 ui.separator();
                 if let Some(engine_label) = &engine_label {

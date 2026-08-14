@@ -2,7 +2,7 @@
 
 Rust workspace: RPG Maker VX Ace / VX / XP / 2000 / 2003 save-file editor. All code comments and UI strings are Chinese — keep them that way. Layered crates (dependency direction only):
 
-- `crates/rgss-marshal` — Ruby Marshal 4.8 parser/serializer (no GUI deps)
+- `crates/rgss-marshal` — Ruby Marshal 4.8 parser/serializer + RGSSAD/RGSS2A/RGSS3A 加密包解包（`rgss3a` 模块，格式与 mkxp rgssad.cpp 一致；v1/v2 未实测，v3 有 RMVXA_test 夹具）(no GUI deps)
 - `crates/rgss-lcf` — LCF container (LSD/LDB, RPG2000/2003) parser/serializer (no GUI deps; `encoding_rs` for GBK/Shift-JIS display)
 - `crates/rgss-db` — engine detection + database name extraction (Marshal 与 LDB 两套)
 - `crates/rgss-save` — save-file editing API（`SaveData` = Marshal；`lcf::SaveLsd` = LSD）
@@ -14,6 +14,7 @@ Rust workspace: RPG Maker VX Ace / VX / XP / 2000 / 2003 save-file editor. All c
 - `cargo run -p editor` — launch the GUI (debug keeps console; release uses `windows_subsystem = "windows"`, no console)
 - `cargo run -q -p rgss-marshal --bin rgss-dump -- <file>` — dump a marshal file; `--roundtrip` verifies byte-exact parse→dump; `--json` prints a debug tree. The main debugging tool.
 - `cargo run -q -p rgss-lcf --example chklsd -- <file.lsd>` — LSD/LDB 的 chunk 结构摘要
+- `cargo run -q -p rgss-marshal --example rgss3a -- <包> <输出目录>` — 解包 RGSSAD/RGSS2A/RGSS3A 加密包（`-l` 只列文件）
 - `rgss-save/examples/e2e.rs` — 三引擎端到端验证；`rgss-db/examples/verify.rs` — 三引擎数据库名称验证。均使用真实夹具（RMVXA_test / RMVX_test / RM2000_test）。
 
 ## Core invariant: byte-exact roundtrip

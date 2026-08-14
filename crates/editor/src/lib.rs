@@ -1729,4 +1729,186 @@ mod tests {
         assert_eq!(val, Some(35), "拖拽后变量 2 应为 35");
         assert!(app.dirty);
     }
+
+    /// 原始数据页：多段存档（RMVX 14 段独立对象）应逐段显示全部根对象
+    #[test]
+    fn raw_tab_shows_all_segments() {
+        let ctx = egui::Context::default();
+        crate::app::load_cn_font(&ctx);
+        let mut app = App {
+            db: None,
+            save: Some(SaveView::Marshal(
+                SaveData::open(std::path::Path::new("../../RMVX_test/Save1.rvdata"))
+                    .expect("打开 VX 多段存档"),
+            )),
+            game_dir: None,
+            status: String::new(),
+            status_color: egui::Color32::GRAY,
+            tab: Tab::Raw,
+            dirty: false,
+            sel_actor: None,
+            inv_tab: InvKind::Item,
+            inv_search: String::new(),
+            inv_selected: Default::default(),
+            inv_batch_qty: 1,
+            var_search: String::new(),
+            sw_search: String::new(),
+            skill_search: String::new(),
+            state_search: String::new(),
+            last_error: None,
+        };
+        let save = app.save.as_ref().unwrap();
+        let seg_count = match save {
+            SaveView::Marshal(s) => s.tail_before.len() + 1 + s.tail_after.len(),
+            SaveView::Lsd(_) => unreachable!(),
+        };
+        assert_eq!(seg_count, 14, "VX 夹具应为 14 段");
+        crate::ui_raw::test_hooks::TEST_HEADER_RECTS.with(|r| r.borrow_mut().clear());
+        crate::ui_raw::test_hooks::TEST_VALUE_RECTS.with(|r| r.borrow_mut().clear());
+        run_frame(&ctx, &mut app, Vec::new());
+        let headers = crate::ui_raw::test_hooks::TEST_HEADER_RECTS.with(|r| r.borrow().len());
+        let leaves = crate::ui_raw::test_hooks::TEST_VALUE_RECTS.with(|r| r.borrow().len());
+        // 第 1 段根是叶子（整数），其余 13 段根是容器 → 都应在原始数据页渲染
+        assert_eq!(headers + leaves, 14, "原始数据页应显示全部 14 段，实际标题 {headers} + 叶子 {leaves}");
+    }
+
+    /// 变量页：值为 nil 的变量（如 VX 存档常见）可直接输入整数，写回替换 nil 节点
+    #[test]
+    fn variables_page_nil_value_can_be_edited() {
+        // 标准 VXA 布局：13 元素数组，index 6 = Game_Variables(@data=[nil, nil, 3])
+        let bytes: Vec<u8> = vec![
+            4, 8, b'[', 18, b'0', b'0', b'0', b'0', b'0', b'0', b'o', b':', 19, b'G', b'a',
+            b'm', b'e', b'_', b'V', b'a', b'r', b'i', b'a', b'b', b'l', b'e', b's', 0x06,
+            b':', 10, b'@', b'd', b'a', b't', b'a', b'[', 8, b'0', b'0', b'i', 6, b'0',
+            b'0', b'0', b'0', b'0', b'0',
+        ];
+        let ctx = egui::Context::default();
+        crate::app::load_cn_font(&ctx);
+        let mut app = App {
+            db: None,
+            save: Some(SaveView::Marshal(
+                SaveData::from_bytes(&bytes, rgss_db::Engine::VxAce).expect("解析手工存档"),
+            )),
+            game_dir: None,
+            status: String::new(),
+            status_color: egui::Color32::GRAY,
+            tab: Tab::Variables,
+            dirty: false,
+            sel_actor: None,
+            inv_tab: InvKind::Item,
+            inv_search: String::new(),
+            inv_selected: Default::default(),
+            inv_batch_qty: 1,
+            var_search: String::new(),
+            sw_search: String::new(),
+            skill_search: String::new(),
+            state_search: String::new(),
+            last_error: None,
+        };
+        let SaveView::Marshal(s) = app.save.as_ref().unwrap() else { unreachable!() };
+        assert!(s.variable_node(1).is_some(), "变量 1 存在但为 nil 节点");
+        crate::ui_raw::test_hooks::TEST_VALUE_RECTS.with(|r| r.borrow_mut().clear());
+        run_frame(&ctx, &mut app, Vec::new());
+        // nil 变量与整数变量都应有输入框（nil 行提供整数输入）
+        let rects = crate::ui_raw::test_hooks::TEST_VALUE_RECTS.with(|r| r.borrow().clone());
+        assert!(rects.len() >= 2, "nil 变量行也应渲染 DragValue，实际 {rects:?}");
+        // 拖拽变量 1（nil → 0 起步）→ +30 → 30
+        drag_by(&ctx, &mut app, rects[0].center(), 30.0);
+        let SaveView::Marshal(s) = app.save.as_ref().unwrap() else { unreachable!() };
+        assert_eq!(s.variable(1), Some(30), "nil 变量输入整数后应写回");
+        assert!(app.dirty);
+    }
+
+    /// 变量页：VX 分段存档（大量 nil 变量）渲染与编辑不崩溃、可写回
+    #[test]
+    fn variables_page_vx_segmented_nil_values() {
+        let ctx = egui::Context::default();
+        crate::app::load_cn_font(&ctx);
+        let mut app = App {
+            db: None,
+            save: Some(SaveView::Marshal(
+                SaveData::open(std::path::Path::new("../../RMVX_test/Save1.rvdata"))
+                    .expect("打开 VX 多段存档"),
+            )),
+            game_dir: None,
+            status: String::new(),
+            status_color: egui::Color32::GRAY,
+            tab: Tab::Variables,
+            dirty: false,
+            sel_actor: None,
+            inv_tab: InvKind::Item,
+            inv_search: String::new(),
+            inv_selected: Default::default(),
+            inv_batch_qty: 1,
+            var_search: String::new(),
+            sw_search: String::new(),
+            skill_search: String::new(),
+            state_search: String::new(),
+            last_error: None,
+        };
+        {
+            let SaveView::Marshal(s) = app.save.as_ref().unwrap() else { unreachable!() };
+            // 变量 2 在存档中确为 nil（回归：之前该行只有标签、无法编辑）
+            let (_, node) = s.variable_node(2).expect("变量 2 应有节点");
+            assert_eq!(node, rgss_marshal::NIL_NODE);
+        }
+        crate::ui_raw::test_hooks::TEST_VALUE_RECTS.with(|r| r.borrow_mut().clear());
+        run_frame(&ctx, &mut app, Vec::new());
+        // nil 变量行也渲染 DragValue（与有值的变量一起按 ID 顺序排列）
+        let rects = crate::ui_raw::test_hooks::TEST_VALUE_RECTS.with(|r| r.borrow().clone());
+        assert!(rects.len() >= 2, "nil 变量行应渲染 DragValue，实际 {} 个", rects.len());
+        // 拖拽变量 2 的输入框（行 2 = rects[1]）→ 写回整数
+        drag_by(&ctx, &mut app, rects[1].center(), 30.0);
+        let SaveView::Marshal(s) = app.save.as_ref().unwrap() else { unreachable!() };
+        assert_eq!(s.variable(2), Some(30), "VX 存档 nil 变量应可编辑为整数");
+        // 往返：dump → 重解析 后值保留
+        let out = s.dump_bytes();
+        let s2 = SaveData::from_bytes(&out, s.engine).expect("重解析");
+        assert_eq!(s2.variable(2), Some(30));
+        // 未编辑的变量 3 仍是 nil（保持原样）
+        assert_eq!(s2.variable_node(3).map(|(_, n)| n), Some(rgss_marshal::NIL_NODE));
+    }
+
+    /// 原始数据页（2000）：角色数组 chunk 0x6C 全量显示全部记录，整数字段可编辑
+    #[test]
+    fn lsd_raw_tab_shows_all_actor_records_and_edits() {
+        let ctx = egui::Context::default();
+        crate::app::load_cn_font(&ctx);
+        let mut app = App {
+            db: None,
+            save: Some(SaveView::Lsd(
+                rgss_save::lcf::SaveLsd::open(std::path::Path::new("../../RM2000_test/game/Save01.lsd"))
+                    .expect("打开 LSD 存档"),
+            )),
+            game_dir: None,
+            status: String::new(),
+            status_color: egui::Color32::GRAY,
+            tab: Tab::Raw,
+            dirty: false,
+            sel_actor: None,
+            inv_tab: InvKind::Item,
+            inv_search: String::new(),
+            inv_selected: Default::default(),
+            inv_batch_qty: 1,
+            var_search: String::new(),
+            sw_search: String::new(),
+            skill_search: String::new(),
+            state_search: String::new(),
+            last_error: None,
+        };
+        // 全量渲染：130 条角色记录 × 每条多条可编辑整数字段 + 其它 chunk 字段
+        crate::ui_raw::test_hooks::TEST_VALUE_RECTS.with(|r| r.borrow_mut().clear());
+        run_frame(&ctx, &mut app, Vec::new());
+        let n = crate::ui_raw::test_hooks::TEST_VALUE_RECTS.with(|r| r.borrow().len());
+        assert!(n >= 130 * 5, "角色数组应全量渲染可编辑整数字段，实际 {n}");
+        // API 级编辑写回：角色 1 的 0x1F（level）9 → 42
+        let SaveView::Lsd(s) = app.save.as_mut().unwrap() else { unreachable!() };
+        assert_eq!(s.doc.element_field(0x6C, 1, 0x1F).and_then(|f| f.typed.as_ref()).and_then(|t| t.as_int()), Some(9));
+        assert!(s.doc.set_int_element_field(0x6C, 1, 0x1F, 42));
+        // dump → 重解析：值保留，其余字段原样
+        let out = rgss_lcf::dump(&s.doc);
+        let doc2 = rgss_lcf::parse(&out).expect("重解析");
+        assert_eq!(doc2.element_field(0x6C, 1, 0x1F).and_then(|f| f.typed.as_ref()).and_then(|t| t.as_int()), Some(42));
+        assert_eq!(doc2.element_field(0x6C, 2, 0x1F).and_then(|f| f.typed.as_ref()).and_then(|t| t.as_int()), Some(9), "未编辑的角色 2 等级不变");
+    }
 }

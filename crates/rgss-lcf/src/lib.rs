@@ -594,6 +594,58 @@ impl LcfDoc {
             None => false,
         }
     }
+
+    /// 取结构体数组（如 Actors）中某元素的字段
+    pub fn element_field(
+        &self,
+        chunk_id: u32,
+        elem_id: u32,
+        field_id: u32,
+    ) -> Option<&LcfField> {
+        match self.chunk(chunk_id)?.payload {
+            LcfPayload::StructArray { ref elements, .. } => elements
+                .iter()
+                .find(|e| e.id == elem_id)?
+                .fields
+                .iter()
+                .find(|f| f.id == field_id),
+            _ => None,
+        }
+    }
+
+    pub fn element_field_mut(
+        &mut self,
+        chunk_id: u32,
+        elem_id: u32,
+        field_id: u32,
+    ) -> Option<&mut LcfField> {
+        match self.chunk_mut(chunk_id)?.payload {
+            LcfPayload::StructArray { ref mut elements, .. } => elements
+                .iter_mut()
+                .find(|e| e.id == elem_id)?
+                .fields
+                .iter_mut()
+                .find(|f| f.id == field_id),
+            _ => None,
+        }
+    }
+
+    /// 设置结构体数组元素字段的整数值（dump 时按 canonical 编码重写）
+    pub fn set_int_element_field(
+        &mut self,
+        chunk_id: u32,
+        elem_id: u32,
+        field_id: u32,
+        v: i64,
+    ) -> bool {
+        match self.element_field_mut(chunk_id, elem_id, field_id) {
+            Some(f) => {
+                f.typed = Some(LcfValue::Int(v));
+                true
+            }
+            None => false,
+        }
+    }
 }
 
 /// 将 LCF 原始字符串解码为可显示文本。
