@@ -6,7 +6,7 @@ Rust workspace: RPG Maker VX Ace / VX / XP / 2000 / 2003 save-file editor. All c
 - `crates/rgss-lcf` — LCF container (LSD/LDB, RPG2000/2003) parser/serializer (no GUI deps; `encoding_rs` for GBK/Shift-JIS display)
 - `crates/rgss-db` — engine detection + database name extraction (Marshal 与 LDB 两套)
 - `crates/rgss-save` — save-file editing API（`SaveData` = Marshal；`lcf::SaveLsd` = LSD）
-- `crates/editor` — egui/eframe GUI（`save_view::SaveView` 统一两种存档）
+- `crates/editor` — egui/eframe GUI（`save_view::SaveView` 统一两种存档；`app.rs` 启动时自动探测系统中文字体，UI 各页为 `ui_variables.rs` / `ui_inventory.rs` / `ui_actors.rs` / `ui_raw.rs`）
 
 ## Commands
 
@@ -25,7 +25,7 @@ Rust workspace: RPG Maker VX Ace / VX / XP / 2000 / 2003 save-file editor. All c
 ## Editing values without corrupting links (easy to get wrong)
 
 - Node index = object identity; `@` links reference arena positions. NEVER point new data at an existing node — always allocate with `tree.new_fixnum / new_string / new_bool / new_nil / new_float` and symbols via `tree.alloc_sym` (dedupes, preserving existing `;` indexes), then attach the returned index.
-- `set_fixnum / set_float / set_utf8_string` mutate in place — only safe on nodes that are exclusively yours.
+- `set_fixnum / set_float / set_utf8_string` mutate in place — only safe on nodes that are exclusively yours. Bignum 用 `set_bignum_decimal`（十进制字符串改写，含负号；非法输入/非 Bignum 节点返回 false 且不改动）。
 - New strings automatically get an `I" ... :E T` UTF-8 ivar wrapper (E_SYM sentinel).
 - Fixnums outside i32 range serialize as Bignum (`l`) — don't change this.
 - LCF 编辑同理：改 `LcfField.typed`（dump 时 canonical 重编码该字段），不改 `raw`；不要改动未编辑字段。整数编码是 liblcf 风格 varint（首字节高位组 + 0x80 续位），不是标准 LEB128！详见 `docs/lcf-format.md`。
@@ -35,16 +35,22 @@ Rust workspace: RPG Maker VX Ace / VX / XP / 2000 / 2003 save-file editor. All c
 - VXA/VX 存档根为 13 元素数组 — index 5 = Game_Switches, 6 = Game_Variables, 8 = Game_Actors, 9 = Game_Party。XP 为 10 元素。哈希键根（`:switches` 等）也支持。检测在 `crates/rgss-save/src/lib.rs` 的 `seg_layout`。
 - **分段对象存档**（常见 VX 自定义脚本，如 `RMVX_test/Save1.rvdata` = 14 段）：每段根对象为单个 `Game_*`，`detect_seg_roles` 按类名识别角色 → `seg_roles`，访问器经 `role_node` 路由到对应段树。段索引按文件顺序 = `tail_before ++ [tree] ++ tail_after`。
 - DB name arrays are 1-based with a nil placeholder at index 0; IDs start at 1.
-- Switches/variables live in `@data` arrays; `set_switch / set_variable` extend the array as needed.
+- Switches/variables live in `@data` arrays; `set_switch / set_variable` extend the array as needed. `variable_node / set_variable_node` 支持哈希形式 `@data`（自定义脚本）：查已有节点或把任意新节点写回（数组扩展 / 哈希替换或插入键）。`seg_tree_mut` 是公开 API，按文件顺序取段树。
 - 2000/2003（`SaveLsd`）：开关/变量在 System chunk（0x20/0x22）；金钱/背包/队伍在 Inventory chunk；角色在 Actors chunk（元素 = [ID][字段流]）。扩展开关/变量数组时要同步更新 `*_size` 字段。
 - 非标准布局：API 返回 None/空 — 编辑器回退到原始数据页。
 - `SaveData::save()` / `SaveLsd::save()` 都在覆盖前写 `.bak`，并保持多段/chunk 顺序。别改这个行为。
+
+## Raw tab（ui_raw.rs）
+
+- JSON 式树编辑器：容器（数组/哈希/对象/Struct）可折叠、可删除子项/键值对；叶子按类型（nil/bool/fixnum/float/string）内联编辑，可改类型、按选择类型添加元素。
+- 布尔哨兵（TRUE/FALSE_NODE）不在 arena 中，切换时必须 `new_bool` 新建节点由调用方写回父容器。循环引用靠祖先链 `path` 检测防止无限递归（显示 `(循环引用)`）。
+- 行内编辑器（`edit_child_value` / `edit_leaf_value`）在 ui_variables.rs 变量页复用，签名返回「是否渲染了编辑器 + 需要替换进父容器的节点」。
 
 ## Fixtures & gotchas
 
 - `RMVXA_test/`（VX Ace，2 段存档）、`RMVX_test/`（VX，14 段独立对象存档）、`RM2000_test/game/`（2000，三份 LSD + LDB）都是 gitignore 的真实游戏，改动不可恢复。
 - 2000/2003 的 LSD 是标准 LCF（"LcfSaveData"）格式；`rework/` 里 RMModify 的 "@checksum" LSD 文档与夹具不符，仅作逆向历史参考。2003 无夹具，按 liblcf 字段表实现但未经实测。
 - 2000 角色存档存的是能力**修正值**（hp_mod 等），LDB 无武器/防具/职业/变量名；经验曲线在角色身上（无 class_exps）。
-- Release profile uses `lto = "fat"` + `panic = "abort"` → slow builds; use debug for iteration.
+- Release profile uses `opt-level = "s"` + `lto = true` + `panic = "abort"` → slow builds; use debug for iteration.
 - Engine detection keys: `Game.rvproj2` = VX Ace, `Game.rvproj` = VX, `Game.rxproj` = XP, `RPG_RT.ini` = 2000/2003（ini 含 "2003" 判 2003）。
 - Repo has no commits or CI yet; don't assume a CI gate.

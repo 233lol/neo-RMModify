@@ -1,4 +1,4 @@
-//! 原始数据标签页：通用 Marshal 树浏览与编辑（兜底模式）＋ LCF（2000/2003）结构视图
+//! 原始数据标签页：通用 Marshal 树（JSON 式展开视图）＋ LCF（2000/2003）结构视图
 //!
 //! 非标准布局的存档（自定义脚本）也能在这里编辑任意节点。
 
@@ -8,54 +8,550 @@ use rgss_marshal::Kind;
 use crate::app::App;
 use crate::save_view::SaveView;
 
+/// 测试钩子：记录上一帧渲染的数值编辑器 / 勾选框位置（仅测试用）
+#[cfg(test)]
+pub(crate) mod test_hooks {
+    thread_local! {
+        pub(crate) static TEST_VALUE_RECTS: std::cell::RefCell<Vec<egui::Rect>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+        pub(crate) static TEST_CHECK_RECTS: std::cell::RefCell<Vec<egui::Rect>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+        pub(crate) static TEST_HEADER_RECTS: std::cell::RefCell<Vec<egui::Rect>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+        pub(crate) static TEST_ADD_RECTS: std::cell::RefCell<Vec<egui::Rect>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+        pub(crate) static TEST_COMBO_RECTS: std::cell::RefCell<Vec<egui::Rect>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+        pub(crate) static TEST_COMBO_ITEM_RECTS: std::cell::RefCell<Vec<egui::Rect>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+        pub(crate) static TEST_DELETE_RECTS: std::cell::RefCell<Vec<egui::Rect>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+}
+
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
-    let App { save, raw_path, dirty, .. } = app;
+    let App { save, dirty, .. } = app;
     let Some(save) = save.as_mut() else { return };
     match save {
-        SaveView::Marshal(s) => show_marshal(s, ui, raw_path, dirty),
+        SaveView::Marshal(s) => show_marshal(s, ui, dirty),
         SaveView::Lsd(s) => show_lcf(s, ui, dirty),
     }
 }
 
-fn show_marshal(
-    save: &mut rgss_save::SaveData,
+/// 行缩进
+fn indent(depth: usize) -> f32 {
+    14.0 + depth as f32 * 18.0
+}
+
+/// 容器标题文本（数组/哈希/对象/结构体）
+fn container_title_text(tree: &rgss_marshal::Tree, key: &str, idx: u32) -> String {
+    let head = if key.is_empty() {
+        String::new()
+    } else {
+        format!("{key} ")
+    };
+    match tree.kind(idx) {
+        Kind::Array(items) => format!("{head}数组 [{}]", items.len()),
+        Kind::Hash { pairs, .. } => format!("{head}哈希 [{}]", pairs.len()),
+        Kind::Object { class, ivars } => {
+            format!("{head}对象 {} [{}]", tree.sym_display(*class), ivars.len())
+        }
+        Kind::Struct { class, members } => {
+            format!("{head}结构体 {} [{}]", tree.sym_display(*class), members.len())
+        }
+        _ => key.to_string(),
+    }
+}
+
+/// 容器标题行：折叠按钮（＋/－ + 标题，点击切换）+ 删除按钮（标题右侧，位置不变）。
+/// state 由点击时立即写入 ctx 内存。`indent_row` 为 false 时不加行首缩进。
+/// `id` 必须在调用方 ui 上预计算（与 container_body 一致，否则展开状态存不到）。
+fn container_title(
     ui: &mut egui::Ui,
-    raw_path: &mut Vec<u32>,
-    dirty: &mut bool,
+    id: egui::Id,
+    depth: usize,
+    title: String,
+    show_delete: bool,
+    remove: &mut bool,
+    indent_row: bool,
 ) {
+    ui.horizontal(|ui| {
+        if indent_row {
+            ui.add_space(indent(depth));
+        }
+        let open =
+            egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false)
+                .is_open();
+        // 展开符号用全角 ＋/－（等宽且 GBK 必含；半角 +/- 宽度不同会让标题长度变化）
+        let arrow = if open { "－" } else { "＋" };
+        let title_resp = ui.add(egui::Button::new(format!("{arrow} {title}")).frame(false));
+        if title_resp.clicked() {
+            let mut st =
+                egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
+            st.set_open(!st.is_open());
+            st.store(ui.ctx());
+        }
+        #[cfg(test)]
+        crate::ui_raw::test_hooks::TEST_HEADER_RECTS
+            .with(|r| r.borrow_mut().push(title_resp.rect));
+        if show_delete && delete_button(ui) {
+            *remove = true;
+        }
+    });
+}
+
+/// 容器 body：标题展开时在标题下方渲染（先切垂直，兼容 horizontal 上下文）。
+fn container_body(ui: &mut egui::Ui, id: egui::Id, body: impl FnOnce(&mut egui::Ui)) {
+    let mut state =
+        egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
+    if state.is_open() {
+        state.show_body_unindented(ui, |ui| {
+            ui.vertical(|ui| {
+                body(ui);
+            });
+        });
+    }
+}
+
+/// 容器行：标题 + 删除按钮 + body（标题下方）
+fn container_row(
+    ui: &mut egui::Ui,
+    depth: usize,
+    idx: u32,
+    title: String,
+    show_delete: bool,
+    remove: &mut bool,
+    indent_row: bool,
+    body: impl FnOnce(&mut egui::Ui),
+) {
+    let id = ui.make_persistent_id((depth, idx));
+    container_title(ui, id, depth, title, show_delete, remove, indent_row);
+    container_body(ui, id, body);
+}
+
+fn show_marshal(save: &mut rgss_save::SaveData, ui: &mut egui::Ui, dirty: &mut bool) {
     let tree = &mut save.tree;
     let root = tree.root();
 
     ui.heading("原始数据");
-    ui.weak("通用 Marshal 树：可直接编辑任意节点的数值。谨慎操作！");
+    ui.weak("通用 Marshal 树（JSON 式展开视图）：节点行内可直接编辑数值。谨慎操作！");
     ui.add_space(4.0);
 
-    // 面包屑导航
-    let mut path = raw_path.clone();
-    let mut cur = root;
-    ui.horizontal_wrapped(|ui| {
-        if ui.link("根").clicked() {
-            path.clear();
-        }
-        if !path.is_empty() {
-            ui.separator();
-        }
-        let n = path.len();
-        for i in 0..n {
-            let p = path[i];
-            let label = node_label(tree, p);
-            if ui.link(label).clicked() {
-                path.truncate(i + 1);
-            }
-            cur = p;
-        }
-        ui.label(" ›");
-    });
-    ui.separator();
+    let mut dummy_remove = false;
+    let mut path = Vec::new();
+    egui::ScrollArea::both()
+        .id_salt("raw_tree")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            render_child_row(
+                tree, ui, 0, "根".to_string(), root, dirty, &mut dummy_remove, &mut path, false,
+            );
+        });
+}
 
-    // 当前节点编辑区
-    edit_node(tree, ui, cur, &mut path, dirty);
-    *raw_path = path;
+/// JSON 式渲染一行节点。
+/// 返回需要父容器替换的新节点（哨兵布尔切换时）。
+/// `remove` 是父容器的删除槽：本行「删」按钮被点击时置 true。
+/// `path` 是当前祖先链（用于检测循环引用，防止无限递归）。
+/// `show_delete` 为 false 时不显示删除按钮（根节点、哈希键值对的值）。
+fn render_child_row(
+    tree: &mut rgss_marshal::Tree,
+    ui: &mut egui::Ui,
+    depth: usize,
+    key: String,
+    idx: u32,
+    dirty: &mut bool,
+    remove: &mut bool,
+    path: &mut Vec<u32>,
+    show_delete: bool,
+) -> Option<u32> {
+    // 循环引用（@ 链接成环）：沿祖先链已出现过，停止递归
+    if path.contains(&idx) {
+        ui.horizontal(|ui| {
+            ui.add_space(indent(depth));
+            if !key.is_empty() {
+                ui.monospace(&key);
+            }
+            ui.label(RichText::new("↻ 循环引用（已在上层显示）").weak());
+        });
+        return None;
+    }
+    // 哨兵不在 arena 中，直接走叶子行
+    if idx == rgss_marshal::NIL_NODE
+        || idx == rgss_marshal::TRUE_NODE
+        || idx == rgss_marshal::FALSE_NODE
+    {
+        return leaf_row(tree, ui, depth, key, idx, dirty, remove, show_delete);
+    }
+    match tree.kind(idx).clone() {
+        Kind::Array(_) => {
+            path.push(idx);
+            container_row(
+                ui,
+                depth,
+                idx,
+                container_title_text(tree, &key, idx),
+                show_delete,
+                remove,
+                !key.is_empty(),
+                |ui| {
+                    render_container_children(tree, ui, depth + 1, idx, dirty, path);
+                },
+            );
+            path.pop();
+            None
+        }
+        Kind::Hash { pairs, .. } => {
+            let children = pairs;
+            let mut child_remove: Option<usize> = None;
+            path.push(idx);
+            container_row(
+                ui,
+                depth,
+                idx,
+                container_title_text(tree, &key, idx),
+                show_delete,
+                remove,
+                !key.is_empty(),
+                |ui| {
+                    for (i, (k, v)) in children.iter().enumerate() {
+                        let value_is_container = is_container_node(tree, *v);
+                        // id 在哈希 body 的 ui 上预计算（标题与 body 共用，展开状态才能互通）
+                        let v_id = ui.make_persistent_id((depth + 1, *v));
+                        ui.horizontal(|ui| {
+                            ui.add_space(indent(depth + 1));
+                            // 键：叶值行内编辑，否则显示摘要
+                            let (k_edited, k_new) = edit_child_value(tree, ui, *k, dirty);
+                            if let Some(nn) = k_new {
+                                if let Kind::Hash { pairs, .. } = tree.kind_mut(idx) {
+                                    pairs[i].0 = nn;
+                                }
+                            }
+                            if !k_edited {
+                                ui.label(RichText::new(node_label(tree, *k)).weak());
+                            }
+                            ui.monospace("→");
+                            if value_is_container {
+                                // 容器值：标题行内联（body 在键值对行下方单独渲染）
+                                let v_title = container_title_text(tree, "", *v);
+                                let mut remove_this = false;
+                                container_title(
+                                    ui,
+                                    v_id,
+                                    depth + 1,
+                                    v_title,
+                                    true,
+                                    &mut remove_this,
+                                    false,
+                                );
+                                if remove_this {
+                                    child_remove = Some(i);
+                                }
+                            } else {
+                                // 叶子值：行内编辑器 + 删除按钮紧跟其后
+                                let mut remove_this = false;
+                                if let Some(nn) = render_child_row(
+                                    tree, ui, depth + 1, String::new(), *v, dirty,
+                                    &mut remove_this, path, false,
+                                ) {
+                                    if let Kind::Hash { pairs, .. } = tree.kind_mut(idx) {
+                                        pairs[i].1 = nn;
+                                    }
+                                }
+                                if remove_this || delete_button(ui) {
+                                    child_remove = Some(i);
+                                }
+                            }
+                        });
+                        // 容器值：body 在键值对行下方、相对父行偏一级缩进
+                        if value_is_container {
+                            container_body(ui, v_id, |ui| {
+                                render_container_children(tree, ui, depth + 2, *v, dirty, path);
+                            });
+                        }
+                    }
+                    ui.horizontal(|ui| {
+                        ui.add_space(indent(depth + 1));
+                        let add_type = add_type_combo(ui, idx);
+                        let add_resp = ui.small_button("+ 添加键值对");
+                        #[cfg(test)]
+                        crate::ui_raw::test_hooks::TEST_ADD_RECTS
+                            .with(|r| r.borrow_mut().push(add_resp.rect));
+                        if add_resp.clicked() {
+                            // 键默认整数 0；值按所选类型创建，添加后立即可编辑
+                            let k = tree.new_fixnum(0);
+                            let v = new_leaf_node(tree, add_type);
+                            if let Kind::Hash { pairs, .. } = tree.kind_mut(idx) {
+                                pairs.push((k, v));
+                            }
+                            *dirty = true;
+                        }
+                    });
+                },
+            );
+            path.pop();
+            if let Some(i) = child_remove {
+                if let Kind::Hash { pairs, .. } = tree.kind_mut(idx) {
+                    pairs.remove(i);
+                }
+                *dirty = true;
+            }
+            None
+        }
+        Kind::Object { class: _, ivars: _ } => {
+            path.push(idx);
+            container_row(
+                ui,
+                depth,
+                idx,
+                container_title_text(tree, &key, idx),
+                show_delete,
+                remove,
+                !key.is_empty(),
+                |ui| {
+                    render_container_children(tree, ui, depth + 1, idx, dirty, path);
+                },
+            );
+            path.pop();
+            None
+        }
+        Kind::Struct { class: _, members: _ } => {
+            path.push(idx);
+            container_row(
+                ui,
+                depth,
+                idx,
+                container_title_text(tree, &key, idx),
+                show_delete,
+                remove,
+                !key.is_empty(),
+                |ui| {
+                    render_container_children(tree, ui, depth + 1, idx, dirty, path);
+                },
+            );
+            path.pop();
+            None
+        }
+        // 叶子：行内编辑器 + 摘要 + 删除
+        _ => leaf_row(tree, ui, depth, key, idx, dirty, remove, show_delete),
+    }
+}
+
+/// 渲染容器子项（body 内容）：数组/哈希/对象/结构体各自的子行 + 添加按钮。
+/// `depth` 为子行层级（= 容器层级 + 1）。
+fn render_container_children(
+    tree: &mut rgss_marshal::Tree,
+    ui: &mut egui::Ui,
+    depth: usize,
+    idx: u32,
+    dirty: &mut bool,
+    path: &mut Vec<u32>,
+) {
+    match tree.kind(idx).clone() {
+        Kind::Array(items) => {
+            let children = items;
+            let mut child_remove: Option<usize> = None;
+            for (i, v) in children.iter().enumerate() {
+                let mut remove_this = false;
+                if let Some(nn) = render_child_row(
+                    tree, ui, depth, format!("[{i}]"), *v, dirty, &mut remove_this, path, true,
+                ) {
+                    if let Kind::Array(items) = tree.kind_mut(idx) {
+                        items[i] = nn;
+                    }
+                }
+                if remove_this {
+                    child_remove = Some(i);
+                }
+            }
+            ui.horizontal(|ui| {
+                ui.add_space(indent(depth));
+                let add_type = add_type_combo(ui, idx);
+                let add_resp = ui.small_button("+ 添加元素");
+                #[cfg(test)]
+                crate::ui_raw::test_hooks::TEST_ADD_RECTS
+                    .with(|r| r.borrow_mut().push(add_resp.rect));
+                if add_resp.clicked() {
+                    // 按所选类型创建，添加后立即可编辑
+                    let v = new_leaf_node(tree, add_type);
+                    if let Kind::Array(items) = tree.kind_mut(idx) {
+                        items.push(v);
+                    }
+                    *dirty = true;
+                }
+            });
+            if let Some(i) = child_remove {
+                if let Kind::Array(items) = tree.kind_mut(idx) {
+                    items.remove(i);
+                }
+                *dirty = true;
+            }
+        }
+        Kind::Hash { pairs, .. } => {
+            let children = pairs;
+            let mut child_remove: Option<usize> = None;
+            for (i, (k, v)) in children.iter().enumerate() {
+                let value_is_container = is_container_node(tree, *v);
+                // id 在哈希 body 的 ui 上预计算（标题与 body 共用，展开状态才能互通）
+                let v_id = ui.make_persistent_id((depth, *v));
+                ui.horizontal(|ui| {
+                    ui.add_space(indent(depth));
+                    // 键：叶值行内编辑，否则显示摘要
+                    let (k_edited, k_new) = edit_child_value(tree, ui, *k, dirty);
+                    if let Some(nn) = k_new {
+                        if let Kind::Hash { pairs, .. } = tree.kind_mut(idx) {
+                            pairs[i].0 = nn;
+                        }
+                    }
+                    if !k_edited {
+                        ui.label(RichText::new(node_label(tree, *k)).weak());
+                    }
+                    ui.monospace("→");
+                    if value_is_container {
+                        // 容器值：标题行内联（body 在键值对行下方单独渲染）
+                        let v_title = container_title_text(tree, "", *v);
+                        let mut remove_this = false;
+                        container_title(ui, v_id, depth, v_title, true, &mut remove_this, false);
+                        if remove_this {
+                            child_remove = Some(i);
+                        }
+                    } else {
+                        // 叶子值：行内编辑器 + 删除按钮紧跟其后
+                        let mut remove_this = false;
+                        if let Some(nn) = render_child_row(
+                            tree, ui, depth, String::new(), *v, dirty, &mut remove_this, path,
+                            false,
+                        ) {
+                            if let Kind::Hash { pairs, .. } = tree.kind_mut(idx) {
+                                pairs[i].1 = nn;
+                            }
+                        }
+                        if remove_this || delete_button(ui) {
+                            child_remove = Some(i);
+                        }
+                    }
+                });
+                // 容器值：body 在键值对行下方、相对父行偏一级缩进
+                if value_is_container {
+                    container_body(ui, v_id, |ui| {
+                        render_container_children(tree, ui, depth + 1, *v, dirty, path);
+                    });
+                }
+            }
+            ui.horizontal(|ui| {
+                ui.add_space(indent(depth));
+                let add_resp = ui.small_button("+ 添加键值对");
+                #[cfg(test)]
+                crate::ui_raw::test_hooks::TEST_ADD_RECTS
+                    .with(|r| r.borrow_mut().push(add_resp.rect));
+                if add_resp.clicked() {
+                    // 默认整数 0：添加后立即可编辑（nil 无法直接改值）
+                    let k = tree.new_fixnum(0);
+                    let v = tree.new_fixnum(0);
+                    if let Kind::Hash { pairs, .. } = tree.kind_mut(idx) {
+                        pairs.push((k, v));
+                    }
+                    *dirty = true;
+                }
+            });
+            if let Some(i) = child_remove {
+                if let Kind::Hash { pairs, .. } = tree.kind_mut(idx) {
+                    pairs.remove(i);
+                }
+                *dirty = true;
+            }
+        }
+        Kind::Object { class: _, ivars } => {
+            let children = ivars;
+            let mut child_remove: Option<usize> = None;
+            for (i, (k, v)) in children.iter().enumerate() {
+                let mut remove_this = false;
+                let name = format!("@{}", tree.sym_display(*k));
+                if let Some(nn) = render_child_row(
+                    tree, ui, depth, name, *v, dirty, &mut remove_this, path, true,
+                ) {
+                    if let Kind::Object { ivars, .. } = tree.kind_mut(idx) {
+                        ivars[i].1 = nn;
+                    }
+                }
+                if remove_this {
+                    child_remove = Some(i);
+                }
+            }
+            if let Some(i) = child_remove {
+                if let Kind::Object { ivars, .. } = tree.kind_mut(idx) {
+                    ivars.remove(i);
+                }
+                *dirty = true;
+            }
+        }
+        Kind::Struct { class: _, members } => {
+            let children = members;
+            let mut child_remove: Option<usize> = None;
+            for (i, (k, v)) in children.iter().enumerate() {
+                let mut remove_this = false;
+                let name = format!("{}", tree.sym_display(*k));
+                if let Some(nn) = render_child_row(
+                    tree, ui, depth, name, *v, dirty, &mut remove_this, path, true,
+                ) {
+                    if let Kind::Struct { members, .. } = tree.kind_mut(idx) {
+                        members[i].1 = nn;
+                    }
+                }
+                if remove_this {
+                    child_remove = Some(i);
+                }
+            }
+            if let Some(i) = child_remove {
+                if let Kind::Struct { members, .. } = tree.kind_mut(idx) {
+                    members.remove(i);
+                }
+                *dirty = true;
+            }
+        }
+        _ => {}
+    }
+}
+
+/// 叶子节点行：键 + 删除按钮（紧邻键，位置固定）+ 行内编辑器 + 摘要
+fn leaf_row(
+    tree: &mut rgss_marshal::Tree,
+    ui: &mut egui::Ui,
+    depth: usize,
+    key: String,
+    idx: u32,
+    dirty: &mut bool,
+    remove: &mut bool,
+    show_delete: bool,
+) -> Option<u32> {
+    let mut new_ref = None;
+    ui.horizontal(|ui| {
+        // 空键名（哈希值）不再自带缩进，避免与键值对行缩进叠加
+        if !key.is_empty() {
+            ui.add_space(indent(depth));
+            ui.monospace(&key);
+        }
+        let (edited, nn) = edit_child_value(tree, ui, idx, dirty);
+        if let Some(n) = nn {
+            new_ref = Some(n);
+        }
+        if !edited {
+            ui.label(RichText::new(node_label(tree, idx)).weak());
+        }
+        // 删除按钮：紧跟在编辑器/输入框右侧
+        if show_delete && delete_button(ui) {
+            *remove = true;
+        }
+    });
+    new_ref
+}
+
+/// 删除按钮（记录测试钩子）
+fn delete_button(ui: &mut egui::Ui) -> bool {
+    let resp = ui.small_button("删");
+    #[cfg(test)]
+    crate::ui_raw::test_hooks::TEST_DELETE_RECTS.with(|r| r.borrow_mut().push(resp.rect));
+    resp.clicked()
 }
 
 /// LCF（RPG2000/2003）结构视图：chunk → 字段。整数字段可编辑。
@@ -182,6 +678,20 @@ fn show_lcf(save: &mut rgss_save::lcf::SaveLsd, ui: &mut egui::Ui, dirty: &mut b
     }
 }
 
+/// 是否为容器节点（哨兵安全）
+fn is_container_node(tree: &rgss_marshal::Tree, idx: u32) -> bool {
+    if idx == rgss_marshal::NIL_NODE
+        || idx == rgss_marshal::TRUE_NODE
+        || idx == rgss_marshal::FALSE_NODE
+    {
+        return false;
+    }
+    matches!(
+        tree.kind(idx),
+        Kind::Array(_) | Kind::Hash { .. } | Kind::Object { .. } | Kind::Struct { .. }
+    )
+}
+
 fn node_label(tree: &rgss_marshal::Tree, idx: u32) -> String {
     if idx == rgss_marshal::NIL_NODE {
         return "nil".to_string();
@@ -217,245 +727,229 @@ fn node_label(tree: &rgss_marshal::Tree, idx: u32) -> String {
     }
 }
 
-fn edit_node(
+/// 叶子类型（类型转换 / 添加元素时选择）
+#[derive(PartialEq, Clone, Copy, Debug)]
+pub(crate) enum LeafType {
+    Int,
+    Float,
+    Str,
+    Bool,
+    Nil,
+}
+
+impl LeafType {
+    fn name(self) -> &'static str {
+        match self {
+            LeafType::Int => "整数",
+            LeafType::Float => "浮点",
+            LeafType::Str => "字符串",
+            LeafType::Bool => "布尔",
+            LeafType::Nil => "nil",
+        }
+    }
+
+    /// 全部可选项（顺序稳定）
+    fn all() -> [(LeafType, &'static str); 5] {
+        [
+            (LeafType::Int, "整数"),
+            (LeafType::Float, "浮点"),
+            (LeafType::Str, "字符串"),
+            (LeafType::Bool, "布尔"),
+            (LeafType::Nil, "nil"),
+        ]
+    }
+}
+
+/// 当前叶子类型（哨兵安全）；非叶子 / 不可转换类型返回 None
+fn current_leaf_type(tree: &rgss_marshal::Tree, v: u32) -> Option<LeafType> {
+    if v == rgss_marshal::NIL_NODE {
+        return Some(LeafType::Nil);
+    }
+    if v == rgss_marshal::TRUE_NODE || v == rgss_marshal::FALSE_NODE {
+        return Some(LeafType::Bool);
+    }
+    match tree.kind(v) {
+        Kind::Fixnum(_) => Some(LeafType::Int),
+        Kind::Float(_) => Some(LeafType::Float),
+        Kind::Str(_) => Some(LeafType::Str),
+        Kind::True | Kind::False => Some(LeafType::Bool),
+        _ => None,
+    }
+}
+
+/// 按类型新建叶子节点（nil 返回哨兵常量，不占用 arena）
+fn new_leaf_node(tree: &mut rgss_marshal::Tree, t: LeafType) -> u32 {
+    match t {
+        LeafType::Int => tree.new_fixnum(0),
+        LeafType::Float => tree.new_float(0.0),
+        LeafType::Str => tree.new_string(""),
+        LeafType::Bool => tree.new_bool(false),
+        LeafType::Nil => rgss_marshal::NIL_NODE,
+    }
+}
+
+/// 叶子类型下拉：选择不同于当前类型时返回新类型
+fn leaf_type_combo(ui: &mut egui::Ui, current: LeafType) -> Option<LeafType> {
+    let mut sel = current;
+    #[cfg_attr(not(test), allow(unused_variables))]
+    let combo_resp = egui::ComboBox::from_id_salt(ui.next_auto_id())
+        .selected_text(current.name())
+        .show_ui(ui, |ui| {
+            for (t, name) in LeafType::all() {
+                #[cfg_attr(not(test), allow(unused_variables))]
+                let r = ui.selectable_value(&mut sel, t, name);
+                #[cfg(test)]
+                crate::ui_raw::test_hooks::TEST_COMBO_ITEM_RECTS
+                    .with(|x| x.borrow_mut().push(r.rect));
+            }
+        });
+    #[cfg(test)]
+    crate::ui_raw::test_hooks::TEST_COMBO_RECTS
+        .with(|r| r.borrow_mut().push(combo_resp.response.rect));
+    (sel != current).then_some(sel)
+}
+
+/// 「+ 添加」的类型选择下拉（选择持久化在 egui temp 数据，按容器节点区分）
+fn add_type_combo(ui: &mut egui::Ui, container_idx: u32) -> LeafType {
+    let sel_id = ui.make_persistent_id(("add_type", container_idx));
+    let mut sel = ui
+        .data_mut(|d| d.get_temp::<LeafType>(sel_id))
+        .unwrap_or(LeafType::Int);
+    #[cfg_attr(not(test), allow(unused_variables))]
+    let combo_resp = egui::ComboBox::from_id_salt(ui.next_auto_id())
+        .selected_text(sel.name())
+        .show_ui(ui, |ui| {
+            for (t, name) in LeafType::all() {
+                #[cfg_attr(not(test), allow(unused_variables))]
+                let r = ui.selectable_value(&mut sel, t, name);
+                #[cfg(test)]
+                crate::ui_raw::test_hooks::TEST_COMBO_ITEM_RECTS
+                    .with(|x| x.borrow_mut().push(r.rect));
+            }
+        });
+    #[cfg(test)]
+    crate::ui_raw::test_hooks::TEST_COMBO_RECTS
+        .with(|r| r.borrow_mut().push(combo_resp.response.rect));
+    ui.data_mut(|d| d.insert_temp(sel_id, sel));
+    sel
+}
+
+/// 行内编辑子节点值（容器行内；变量页也复用）。
+/// 返回 (是否渲染了编辑器, 需要替换到父容器的节点)：
+/// 布尔哨兵不在 arena 中，切换时必须新建节点，由调用方写回父容器。
+pub(crate) fn edit_child_value(
     tree: &mut rgss_marshal::Tree,
     ui: &mut egui::Ui,
-    idx: u32,
-    path: &mut Vec<u32>,
+    v: u32,
     dirty: &mut bool,
-) {
-    // 值编辑（叶节点）
-    match tree.kind(idx).clone() {
-        Kind::Fixnum(v) => {
-            ui.horizontal(|ui| {
-                ui.label("值:");
-                let mut val = v;
-                if ui
-                    .add(egui::DragValue::new(&mut val).range(i64::MIN..=i64::MAX).speed(1.0))
-                    .changed()
-                {
-                    tree.set_fixnum(idx, val);
-                    *dirty = true;
-                }
-            });
-            return;
+) -> (bool, Option<u32>) {
+    // 类型下拉：nil/整数/浮点/字符串/布尔 可互转（选择后由调用方写回父容器）
+    if let Some(current) = current_leaf_type(tree, v) {
+        if let Some(new_type) = leaf_type_combo(ui, current) {
+            *dirty = true;
+            return (true, Some(new_leaf_node(tree, new_type)));
         }
-        Kind::Str(s) => {
-            ui.horizontal(|ui| {
-                ui.label("值:");
-                let mut buf = s.display();
-                let resp = ui.add(egui::TextEdit::singleline(&mut buf).desired_width(360.0));
-                if resp.changed() {
-                    tree.set_utf8_string(idx, &buf);
-                    *dirty = true;
-                }
-            });
-            return;
+        // 已渲染类型下拉；nil 没有值编辑器
+        if v == rgss_marshal::NIL_NODE {
+            return (true, None);
         }
-        Kind::Float(f) => {
-            ui.horizontal(|ui| {
-                ui.label("值:");
-                let cur = f.to_f64().unwrap_or(0.0);
-                let mut val = cur;
-                if ui
-                    .add(egui::DragValue::new(&mut val).speed(0.1))
-                    .changed()
-                {
-                    tree.set_float(idx, val);
-                    *dirty = true;
-                }
-            });
-            return;
+    }
+    edit_leaf_value(tree, ui, v, dirty)
+}
+
+/// 仅渲染值编辑器（不含类型下拉；变量页用）。
+/// 返回 (是否渲染了编辑器, 需要替换到父容器的节点)。
+pub(crate) fn edit_leaf_value(
+    tree: &mut rgss_marshal::Tree,
+    ui: &mut egui::Ui,
+    v: u32,
+    dirty: &mut bool,
+) -> (bool, Option<u32>) {
+    if v == rgss_marshal::NIL_NODE {
+        ui.label(RichText::new("nil").weak());
+        return (true, None);
+    }
+    if v == rgss_marshal::TRUE_NODE || v == rgss_marshal::FALSE_NODE {
+        let mut on = v == rgss_marshal::TRUE_NODE;
+        let resp = ui.checkbox(&mut on, "");
+        #[cfg(test)]
+        crate::ui_raw::test_hooks::TEST_CHECK_RECTS.with(|r| r.borrow_mut().push(resp.rect));
+        if resp.changed() {
+            *dirty = true;
+            return (true, Some(tree.new_bool(on)));
         }
+        return (true, None);
+    }
+    match tree.kind(v) {
         Kind::True | Kind::False => {
-            let mut on = matches!(tree.kind(idx), Kind::True);
-            if ui.checkbox(&mut on, "真").changed() {
-                *tree.kind_mut(idx) = if on { Kind::True } else { Kind::False };
+            let mut on = matches!(tree.kind(v), Kind::True);
+            let resp = ui.checkbox(&mut on, "");
+            #[cfg(test)]
+            crate::ui_raw::test_hooks::TEST_CHECK_RECTS.with(|r| r.borrow_mut().push(resp.rect));
+            if resp.changed() {
+                *tree.kind_mut(v) = if on { Kind::True } else { Kind::False };
                 *dirty = true;
             }
-            return;
+            (true, None)
+        }
+        Kind::Fixnum(f) => {
+            let mut val = *f;
+            let resp = ui
+                .add(egui::DragValue::new(&mut val).range(i64::MIN..=i64::MAX).speed(1.0));
+            #[cfg(test)]
+            crate::ui_raw::test_hooks::TEST_VALUE_RECTS.with(|r| r.borrow_mut().push(resp.rect));
+            if resp.changed() {
+                tree.set_fixnum(v, val);
+                *dirty = true;
+            }
+            (true, None)
+        }
+        Kind::Float(fl) => {
+            let cur = fl.to_f64().unwrap_or(0.0);
+            let mut val = cur;
+            let resp = ui.add(egui::DragValue::new(&mut val).speed(0.1));
+            #[cfg(test)]
+            crate::ui_raw::test_hooks::TEST_VALUE_RECTS.with(|r| r.borrow_mut().push(resp.rect));
+            if resp.changed() {
+                tree.set_float(v, val);
+                *dirty = true;
+            }
+            (true, None)
+        }
+        Kind::Str(data) => {
+            let mut buf = data.display();
+            let resp = ui.add(egui::TextEdit::singleline(&mut buf).desired_width(220.0));
+            #[cfg(test)]
+            crate::ui_raw::test_hooks::TEST_VALUE_RECTS.with(|r| r.borrow_mut().push(resp.rect));
+            if resp.changed() {
+                tree.set_utf8_string(v, &buf);
+                *dirty = true;
+            }
+            (true, None)
         }
         Kind::Bignum { .. } => {
-            if let Some(s) = tree.bignum_to_string(idx) {
-                ui.label(format!("大整数: {s}"));
+            let mut buf = tree.bignum_to_string(v).unwrap_or_default();
+            let resp = ui.add(egui::TextEdit::singleline(&mut buf).desired_width(160.0));
+            #[cfg(test)]
+            crate::ui_raw::test_hooks::TEST_VALUE_RECTS.with(|r| r.borrow_mut().push(resp.rect));
+            if resp.changed() {
+                if tree.set_bignum_decimal(v, &buf) {
+                    *dirty = true;
+                }
             }
-            return;
+            (true, None)
         }
-        _ => {}
-    }
-
-    // 容器节点：显示子项
-    let mut remove_at: Option<(String, usize)> = None;
-    match tree.kind(idx).clone() {
-        Kind::Object { class, ivars } => {
-            ui.label(RichText::new(format!("类: {}", tree.sym_display(class))).strong());
-            egui::ScrollArea::vertical().id_salt("raw_obj").auto_shrink([false, true]).show(ui, |ui| {
-                for (i, (k, v)) in ivars.iter().enumerate() {
-                    ui.horizontal(|ui| {
-                        if ui.link(format!("@{} →", tree.sym_display(*k))).clicked() {
-                            path.push(*v);
-                        }
-                        let lvl = level_of(tree, *v);
-                        ui.label(RichText::new(lvl).weak());
-                        if ui.small_button("✕").clicked() {
-                            remove_at = Some((format!("ivar_{i}"), i));
-                        }
-                    });
-                }
-            });
-        }
-        Kind::Hash { pairs, .. } => {
-            egui::ScrollArea::vertical().id_salt("raw_hash").auto_shrink([false, true]).show(ui, |ui| {
-                for (i, (k, v)) in pairs.iter().enumerate() {
-                    ui.horizontal(|ui| {
-                        if ui.link(format!("{} →", node_label(tree, *k))).clicked() {
-                            path.push(*v);
-                        }
-                        let lvl = level_of(tree, *v);
-                        ui.label(RichText::new(lvl).weak());
-                        if ui.small_button("✕").clicked() {
-                            remove_at = Some((format!("pair_{i}"), i));
-                        }
-                    });
-                }
-            });
-            ui.horizontal(|ui| {
-                if ui.small_button("+ 添加键值对").clicked() {
-                    let k = tree.new_fixnum(tree.node_count() as i64);
-                    let v = tree.new_nil();
-                    if let Kind::Hash { pairs, .. } = tree.kind_mut(idx) {
-                        pairs.push((k, v));
-                    }
-                    *dirty = true;
-                }
-            });
-        }
-        Kind::Array(items) => {
-            egui::ScrollArea::vertical().id_salt("raw_arr").auto_shrink([false, true]).show(ui, |ui| {
-                for (i, v) in items.iter().enumerate() {
-                    ui.horizontal(|ui| {
-                        if ui.link(format!("[{}] →", i)).clicked() {
-                            path.push(*v);
-                        }
-                        let lvl = level_of(tree, *v);
-                        ui.label(RichText::new(lvl).weak());
-                        if ui.small_button("✕").clicked() {
-                            remove_at = Some((format!("item_{i}"), i));
-                        }
-                    });
-                }
-            });
-            ui.horizontal(|ui| {
-                if ui.small_button("+ 添加元素").clicked() {
-                    let v = tree.new_nil();
-                    if let Kind::Array(items) = tree.kind_mut(idx) {
-                        items.push(v);
-                    }
-                    *dirty = true;
-                }
-            });
-        }
-        Kind::Struct { class, members } => {
-            ui.label(RichText::new(format!("结构体: {}", tree.sym_display(class))).strong());
-            egui::ScrollArea::vertical().id_salt("raw_struct").auto_shrink([false, true]).show(ui, |ui| {
-                for (k, v) in members.iter() {
-                    ui.horizontal(|ui| {
-                        if ui.link(format!("{} →", tree.sym_display(*k))).clicked() {
-                            path.push(*v);
-                        }
-                        let lvl = level_of(tree, *v);
-                        ui.label(RichText::new(lvl).weak());
-                    });
-                }
-            });
-        }
-        Kind::Extended { inner, .. }
-        | Kind::UClass { inner, .. }
-        | Kind::UserMarshal { inner, .. }
-        | Kind::Data { inner, .. } => {
-            ui.horizontal(|ui| {
-                ui.label("内容:");
-                if ui.link("查看 →").clicked() {
-                    path.push(inner);
-                }
-            });
-        }
-        Kind::Ival { inner, pairs } => {
-            ui.label(format!("Ivar 包装 ({} 对)", pairs.len()));
-            ui.horizontal(|ui| {
-                ui.label("内容:");
-                if ui.link("查看 →").clicked() {
-                    path.push(inner);
-                }
-            });
-        }
-        Kind::Sym(s) => {
-            ui.label(format!("符号: {}", tree.sym_display(s)));
-        }
-        Kind::UserDef { class, payload } => {
-            ui.label(format!("UserDef {}: {:?}", tree.sym_display(class), payload.display()));
-        }
-        Kind::Regexp { src, .. } => {
-            ui.label(format!("正则: /{}/", src.display()));
-        }
-        Kind::Class(c) => {
-            ui.label(format!("类: {}", String::from_utf8_lossy(&c)));
-        }
-        Kind::Module { name, .. } => {
-            ui.label(format!("模块: {}", String::from_utf8_lossy(&name)));
-        }
-        Kind::Nil => {}
-        Kind::True | Kind::False | Kind::Fixnum(_) | Kind::Str(_) | Kind::Float(_) | Kind::Bignum { .. } => {}
-    }
-
-    if let Some((key, i)) = remove_at {
-        if remove_child(tree, idx, &key, i) {
-            *dirty = true;
-            path.clear();
-        }
+        _ => (false, None),
     }
 }
 
-fn remove_child(tree: &mut rgss_marshal::Tree, parent: u32, key: &str, i: usize) -> bool {
-    if key.starts_with("ivar_") {
-        if let Kind::Object { ivars, .. } = tree.kind_mut(parent) {
-            if i < ivars.len() {
-                ivars.remove(i);
-                return true;
-            }
-        }
-    } else if key.starts_with("pair_") {
-        if let Kind::Hash { pairs, .. } = tree.kind_mut(parent) {
-            if i < pairs.len() {
-                pairs.remove(i);
-                return true;
-            }
-        }
-    } else if key.starts_with("item_") {
-        if let Kind::Array(items) = tree.kind_mut(parent) {
-            if i < items.len() {
-                items.remove(i);
-                return true;
-            }
-        }
+/// 叶子类型显示名（只读；哨兵安全）。变量页用。
+pub(crate) fn leaf_type_label(tree: &rgss_marshal::Tree, v: u32) -> &'static str {
+    if let Some(t) = current_leaf_type(tree, v) {
+        return t.name();
     }
-    false
-}
-
-fn level_of(tree: &rgss_marshal::Tree, idx: u32) -> String {
-    match tree.kind(idx) {
-        Kind::Nil => "nil".to_string(),
-        Kind::True => "true".to_string(),
-        Kind::False => "false".to_string(),
-        Kind::Fixnum(v) => format!("= {v}"),
-        Kind::Str(s) => format!("= {:?}", s.display()),
-        Kind::Sym(s) => format!(":{}", tree.sym_display(*s)),
-        Kind::Float(f) => format!("= {:?}", f.to_f64()),
-        Kind::Bignum { .. } => "大整数".to_string(),
-        Kind::Array(a) => format!("数组 [{}]", a.len()),
-        Kind::Hash { pairs, .. } => format!("哈希 [{}]", pairs.len()),
-        Kind::Object { class, .. } => format!("{}", tree.sym_display(*class)),
-        Kind::Struct { class, .. } => format!("结构体 {}", tree.sym_display(*class)),
-        _ => "…".to_string(),
+    match tree.kind(v) {
+        Kind::Bignum { .. } => "大整数",
+        _ => "其他",
     }
 }

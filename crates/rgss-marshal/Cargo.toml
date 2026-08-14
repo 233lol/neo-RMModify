@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-num-bigint = "0.4"
+num-bigint = "0.5"
 
 [dev-dependencies]
 flate2 = "1"

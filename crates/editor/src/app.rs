@@ -35,9 +35,6 @@ pub struct App {
     pub skill_search: String,
     pub state_search: String,
 
-    // 原始数据页
-    pub raw_path: Vec<u32>,
-
     // 弹窗状态
     pub last_error: Option<String>,
 }
@@ -73,7 +70,6 @@ impl App {
             sw_search: String::new(),
             skill_search: String::new(),
             state_search: String::new(),
-            raw_path: Vec::new(),
             last_error: None,
         }
     }
@@ -133,7 +129,6 @@ impl App {
                     let note = save.note().unwrap_or_default();
                     self.save = Some(save);
                     self.sel_actor = None;
-                    self.raw_path.clear();
                     self.inv_selected.clear();
                     self.dirty = false;
                     // 总是从存档所在目录自动定位游戏：打开其他游戏的存档时切换数据库
@@ -347,14 +342,16 @@ impl eframe::App for App {
     }
 }
 
-/// 已知的系统中文字体路径（快路径，命中即用）；失败时回退到自动发现
-const KNOWN_CJK_PATHS: [&str; 15] = [
-    // Windows
-    "C:/Windows/Fonts/simhei.ttf", // 黑体
-    "C:/Windows/Fonts/msyh.ttc",   // 微软雅黑
+/// 已知的系统中文字体路径（快路径，命中即用）；失败时回退到自动发现。
+/// 顺序按字符覆盖面排列：覆盖面大的字体优先（如微软雅黑、等线）。
+const KNOWN_CJK_PATHS: [&str; 16] = [
+    // Windows（字符覆盖面从大到小）
+    "C:/Windows/Fonts/msyh.ttc",     // 微软雅黑
     "C:/Windows/Fonts/msyh.ttf",
-    "C:/Windows/Fonts/simsun.ttc", // 宋体
+    "C:/Windows/Fonts/dengxian.ttf", // 等线
+    "C:/Windows/Fonts/simsun.ttc",   // 宋体
     "C:/Windows/Fonts/NotoSansSC-Regular.otf",
+    "C:/Windows/Fonts/simhei.ttf",   // 黑体（覆盖面较小，最后）
     // macOS
     "/System/Library/Fonts/PingFang.ttc",
     "/System/Library/Fonts/STHeiti Light.ttc",
@@ -370,14 +367,29 @@ const KNOWN_CJK_PATHS: [&str; 15] = [
 ];
 
 /// 文件名关键字（快速过滤中文字体候选）
-const FONT_KEYWORDS: [&str; 18] = [
-    "simhei", "msyh", "simsun", "pingfang", "hiragino", "yahei", "wqy", "wenquanyi",
-    "notosanscjk", "notosanssc", "notoserifcjk", "notoserifsc", "sourcehan", "sarasa",
-    "droid", "fallback", "songti", "heiti",
+const FONT_KEYWORDS: [&str; 20] = [
+    "msyh", "yahei", "dengxian", "simsun", "notosanscjk", "notosanssc", "sourcehan",
+    "sarasa", "pingfang", "hiragino", "wqy", "wenquanyi", "notoserifcjk", "notoserifsc",
+    "droid", "fallback", "songti", "heiti", "simhei", "cjk",
 ];
 
 /// 用于验证字体是否支持中文的代表性字符
 const CJK_CHECK_CHARS: [u32; 5] = [0x4E00, 0x4F60, 0x4E2D, 0x6587, 0x9F99]; // 一你中文龙
+
+/// 扩展探测字符（CJK 基础 + 生僻 CJK + UI 常用符号），用于给候选字体评分：覆盖面大的优先
+const FONT_PROBE_CHARS: [u32; 17] = [
+    0x4E00, 0x4F60, 0x4E2D, 0x6587, 0x9F99, // 一你中文龙
+    0x9FA6, 0x9FC3, 0x9FE8,                 // 生僻 CJK（区分覆盖广度，如雅黑有而黑体无）
+    0x2192,                                 // →
+    0x2191,                                 // ↑
+    0x2190,                                 // ←
+    0x21BB,                                 // ↻
+    0x2713,                                 // ✓
+    0x2715,                                 // ✕
+    0x25B8,                                 // ▸
+    0x25BE,                                 // ▾
+    0x2605,                                 // ★
+];
 
 /// 加载中文字体：先试已知路径，失败则自动扫描系统字体目录并验证 CJK 覆盖；
 /// 都找不到时置空字体（文字显示占位符，不崩溃）
@@ -444,25 +456,36 @@ fn font_dirs() -> Vec<PathBuf> {
     dirs
 }
 
-/// 扫描字体目录寻找中文字体；`keyword_only` 时只解析文件名含关键字的字体
+/// 扫描字体目录寻找中文字体；`keyword_only` 时只解析文件名含关键字的字体。
+/// 在所有候选里选 FONT_PROBE_CHARS 覆盖数最高的（字符多的字体优先）。
 fn discover_cjk_font() -> Option<(Vec<u8>, u32)> {
     let dirs = font_dirs();
     for keyword_only in [true, false] {
+        let mut best: Option<(u32, Vec<u8>, u32)> = None;
         for d in &dirs {
-            if let Some(found) = walk_font_dir(d, keyword_only, 0) {
-                return Some(found);
-            }
+            collect_font_candidates(d, keyword_only, 0, &mut best);
+        }
+        if let Some((_, bytes, index)) = best {
+            return Some((bytes, index));
         }
     }
     None
 }
 
-/// 递归扫描目录；返回首个验证通过中文字体（含 TTC 内的 face 序号）
-fn walk_font_dir(dir: &Path, keyword_only: bool, depth: u32) -> Option<(Vec<u8>, u32)> {
+/// 递归扫描目录，把验证通过的中文字体按覆盖评分加入候选（保留最高分）
+fn collect_font_candidates(
+    dir: &Path,
+    keyword_only: bool,
+    depth: u32,
+    best: &mut Option<(u32, Vec<u8>, u32)>,
+) {
     if depth > 5 {
-        return None;
+        return;
     }
-    let mut entries: Vec<_> = std::fs::read_dir(dir).ok()?.flatten().collect();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut entries: Vec<_> = entries.flatten().collect();
     entries.sort_by_key(|e| e.file_name());
     for e in entries {
         let p = e.path();
@@ -471,9 +494,7 @@ fn walk_font_dir(dir: &Path, keyword_only: bool, depth: u32) -> Option<(Vec<u8>,
             continue;
         }
         if p.is_dir() {
-            if let Some(f) = walk_font_dir(&p, keyword_only, depth + 1) {
-                return Some(f);
-            }
+            collect_font_candidates(&p, keyword_only, depth + 1, best);
         } else if is_font_file(&p) {
             let lower = name.to_string_lossy().to_lowercase();
             if keyword_only && !FONT_KEYWORDS.iter().any(|k| lower.contains(k)) {
@@ -481,11 +502,13 @@ fn walk_font_dir(dir: &Path, keyword_only: bool, depth: u32) -> Option<(Vec<u8>,
             }
             let Ok(bytes) = std::fs::read(&p) else { continue };
             if let Some(index) = font_supports_cjk(&bytes) {
-                return Some((bytes, index));
+                let score = font_cjk_score(&bytes, index);
+                if best.as_ref().map_or(true, |(s, _, _)| score > *s) {
+                    *best = Some((score, bytes, index));
+                }
             }
         }
     }
-    None
 }
 
 fn is_font_file(p: &Path) -> bool {
@@ -534,97 +557,126 @@ fn face_supports_cjk(data: &[u8], off: usize) -> bool {
         }
         if &data[rec..rec + 4] == b"cmap" {
             return rd_u32(data, rec + 8)
-                .map(|o| cmap_supports_cjk(data, o as usize))
+                .map(|o| cmap_covers(data, o as usize, &CJK_CHECK_CHARS) as usize == CJK_CHECK_CHARS.len())
                 .unwrap_or(false);
         }
     }
     false
 }
 
-/// 遍历 cmap 子表（format 4 / 12 / 13），任一子表覆盖全部校验字符即通过
-fn cmap_supports_cjk(data: &[u8], off: usize) -> bool {
-    let Some(num) = rd_u16(data, off + 2) else { return false };
+/// 单个 face 覆盖的探测字符数（用于排序，字符多的字体优先）
+fn font_cjk_score(data: &[u8], face_index: u32) -> u32 {
+    let face_offsets: Vec<u32> = if data.len() >= 4 && &data[0..4] == b"ttcf" {
+        match rd_u32(data, 8) {
+            Some(n) => (0..n as usize)
+                .map(|i| rd_u32(data, 12 + 4 * i))
+                .collect::<Option<_>>()
+                .unwrap_or_default(),
+            None => return 0,
+        }
+    } else {
+        vec![0]
+    };
+    let Some(off) = face_offsets.get(face_index as usize) else {
+        return 0;
+    };
+    let Some(n) = rd_u16(data, *off as usize + 4) else {
+        return 0;
+    };
+    for i in 0..n as usize {
+        let rec = *off as usize + 12 + 16 * i;
+        if rec + 16 > data.len() {
+            return 0;
+        }
+        if &data[rec..rec + 4] == b"cmap" {
+            return rd_u32(data, rec + 8)
+                .map(|o| cmap_covers(data, o as usize, &FONT_PROBE_CHARS))
+                .unwrap_or(0);
+        }
+    }
+    0
+}
+
+/// 遍历 cmap 子表（format 4 / 12 / 13），统计覆盖的字符数
+fn cmap_covers(data: &[u8], off: usize, chars: &[u32]) -> u32 {
+    let Some(num) = rd_u16(data, off + 2) else { return 0 };
+    let mut best = 0u32;
     for i in 0..num as usize {
         let rec = off + 4 + 8 * i;
         let Some(sub) = rd_u32(data, rec + 4).map(|o| off + o as usize) else {
             continue;
         };
-        let ok = match rd_u16(data, sub) {
-            Some(4) => cmap4_supports(data, sub),
-            Some(12 | 13) => cmap12_supports(data, sub),
-            _ => false,
+        let count = match rd_u16(data, sub) {
+            Some(4) => cmap4_covers(data, sub, chars),
+            Some(12 | 13) => cmap12_covers(data, sub, chars),
+            _ => 0,
         };
-        if ok {
-            return true;
-        }
+        best = best.max(count);
     }
-    false
+    best
 }
 
-/// format 4（BMP 分段映射）
-fn cmap4_supports(data: &[u8], off: usize) -> bool {
-    let Some(seg_x2) = rd_u16(data, off + 6) else { return false };
+/// format 4（BMP 分段映射）：统计 chars 中覆盖的字符数
+fn cmap4_covers(data: &[u8], off: usize, chars: &[u32]) -> u32 {
+    let Some(seg_x2) = rd_u16(data, off + 6) else { return 0 };
     let seg = seg_x2 as usize / 2;
     let base = off + 14; // endCode[] 起始
     let end_base = base + 2 * seg + 2; // startCode[]
     let delta_base = end_base + 2 * seg; // idDelta[]
     let ro_base = delta_base + 2 * seg; // idRangeOffset[]
-    for c in CJK_CHECK_CHARS {
-        let mut found = false;
+    let mut covered = 0;
+    for c in chars {
         for i in 0..seg {
-            let (Some(start), Some(end)) = (rd_u16(data, end_base + 2 * i), rd_u16(data, base + 2 * i))
+            let (Some(start), Some(end)) =
+                (rd_u16(data, end_base + 2 * i), rd_u16(data, base + 2 * i))
             else {
-                return false;
+                return 0;
             };
-            if c >= start as u32 && c <= end as u32 {
-                let Some(ro) = rd_u16(data, ro_base + 2 * i) else { return false };
-                found = if ro == 0 {
+            if *c >= start as u32 && *c <= end as u32 {
+                let Some(ro) = rd_u16(data, ro_base + 2 * i) else { return 0 };
+                let found = if ro == 0 {
                     rd_u16(data, delta_base + 2 * i)
                         .map(|d| (c.wrapping_add(d as u32) & 0xFFFF) != 0)
                         .unwrap_or(false)
                 } else {
                     // glyphIdArray 元素地址 = ro 自身地址 + ro + 2*(c-start)
-                    let arr = ro_base + 2 * i + ro as usize + 2 * (c as usize - start as usize);
+                    let arr = ro_base + 2 * i + ro as usize + 2 * (*c as usize - start as usize);
                     rd_u16(data, arr).map(|g| g != 0).unwrap_or(false)
                 };
+                if found {
+                    covered += 1;
+                }
                 break;
             }
         }
-        if !found {
-            return false;
-        }
     }
-    true
+    covered
 }
 
-/// format 12 / 13（32 位分组映射）
-fn cmap12_supports(data: &[u8], off: usize) -> bool {
-    let Some(n) = rd_u32(data, off + 12) else { return false };
+/// format 12 / 13（32 位分组映射）：统计 chars 中覆盖的字符数
+fn cmap12_covers(data: &[u8], off: usize, chars: &[u32]) -> u32 {
+    let Some(n) = rd_u32(data, off + 12) else { return 0 };
     let groups = off + 16;
-    for c in CJK_CHECK_CHARS {
-        let mut found = false;
+    let mut covered = 0;
+    for c in chars {
         for i in 0..n as usize {
             let g = groups + 12 * i;
             let (Some(start), Some(end)) = (rd_u32(data, g), rd_u32(data, g + 4)) else {
-                return false;
+                return 0;
             };
-            if c >= start && c <= end {
-                found = true;
+            if *c >= start && *c <= end {
+                covered += 1;
                 break;
             }
         }
-        if !found {
-            return false;
-        }
     }
-    true
+    covered
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// 已知中文字体应识别；纯拉丁字体应被拒
     #[test]
     fn cmap_detects_cjk_support() {
         for p in [
@@ -661,5 +713,32 @@ mod tests {
         let (bytes, index) = found.unwrap();
         assert!(font_supports_cjk(&bytes).is_some());
         assert_eq!(font_supports_cjk(&bytes), Some(index));
+    }
+
+    /// 评分排序：微软雅黑的覆盖面评分应不低于黑体（两者都存在时）
+    #[test]
+    fn score_prefers_broader_coverage() {
+        let score = |p: &str| -> Option<u32> {
+            let bytes = std::fs::read(p).ok()?;
+            let index = font_supports_cjk(&bytes)?;
+            Some(font_cjk_score(&bytes, index))
+        };
+        let msyh = score("C:/Windows/Fonts/msyh.ttc");
+        let simsun = score("C:/Windows/Fonts/simsun.ttc");
+        let simhei = score("C:/Windows/Fonts/simhei.ttf");
+        match (msyh, simhei) {
+            (Some(a), Some(b)) => assert!(
+                a >= b,
+                "微软雅黑评分 {a} 应不低于黑体 {b}"
+            ),
+            _ => {}
+        }
+        match (simsun, simhei) {
+            (Some(a), Some(b)) => assert!(
+                a >= b,
+                "宋体评分 {a} 应不低于黑体 {b}"
+            ),
+            _ => {}
+        }
     }
 }

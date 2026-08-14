@@ -169,7 +169,8 @@ impl SaveData {
         }
     }
 
-    fn seg_tree_mut(&mut self, idx: usize) -> &mut Tree {
+    /// 按文件顺序取第 idx 段的可变树（tail_before ++ [tree] ++ tail_after）
+    pub fn seg_tree_mut(&mut self, idx: usize) -> &mut Tree {
         if idx < self.tail_before.len() {
             &mut self.tail_before[idx]
         } else if idx == self.tail_before.len() {
@@ -416,6 +417,79 @@ impl SaveData {
             items[id as usize] = val;
         }
         true
+    }
+
+    /// 变量值节点 → (段号, 节点索引)。段号按文件顺序：tail_before ++ [主段] ++ tail_after。
+    /// 仅返回已存在的节点（不扩展数组）。@data 支持数组或哈希两种形式。
+    pub fn variable_node(&self, id: u32) -> Option<(usize, u32)> {
+        let (seg, tree, obj) = if let Some(node) = self.layout.as_ref().and_then(|l| l.variables) {
+            (self.tail_before.len(), &self.tree, node)
+        } else {
+            let (si, node) = self.seg_roles.as_ref().and_then(|r| r.variables)?;
+            (si, self.seg_tree(si), node)
+        };
+        if obj >= tree.node_count() as u32 {
+            return None;
+        }
+        let d = tree.ivar(obj, "data")?;
+        match tree.kind(d) {
+            Kind::Array(items) => items.get(id as usize).copied().map(|n| (seg, n)),
+            Kind::Hash { pairs, .. } => pairs
+                .iter()
+                .find(|(k, _)| matches!(tree.kind(*k), Kind::Fixnum(f) if *f == i64::from(id)))
+                .map(|(_, v)| (seg, *v)),
+            _ => None,
+        }
+    }
+
+    /// 用已有节点替换变量值（@data 为数组时扩展；为哈希时替换或插入键值对）
+    pub fn set_variable_node(&mut self, id: u32, node: u32) -> bool {
+        let Some((tree, obj)) = self.variables_node_mut() else { return false };
+        let Some(d) = tree.ivar(obj, "data") else { return false };
+        match tree.kind(d).clone() {
+            Kind::Array(_) => {
+                let need = id as usize + 1;
+                let len = match tree.kind(d) {
+                    Kind::Array(items) => items.len(),
+                    _ => return false,
+                };
+                if len < need {
+                    for _ in len..need {
+                        let n = tree.new_fixnum(0);
+                        if let Kind::Array(items) = tree.kind_mut(d) {
+                            items.push(n);
+                        }
+                    }
+                }
+                if let Kind::Array(items) = tree.kind_mut(d) {
+                    items[id as usize] = node;
+                }
+                true
+            }
+            Kind::Hash { .. } => {
+                let pos = match tree.kind(d) {
+                    Kind::Hash { pairs, .. } => pairs.iter().position(|(k, _)| {
+                        matches!(tree.kind(*k), Kind::Fixnum(f) if *f == i64::from(id))
+                    }),
+                    _ => None,
+                };
+                match pos {
+                    Some(p) => {
+                        if let Kind::Hash { pairs, .. } = tree.kind_mut(d) {
+                            pairs[p].1 = node;
+                        }
+                    }
+                    None => {
+                        let k = tree.new_fixnum(i64::from(id));
+                        if let Kind::Hash { pairs, .. } = tree.kind_mut(d) {
+                            pairs.push((k, node));
+                        }
+                    }
+                }
+                true
+            }
+            _ => false,
+        }
     }
 
     // ------------------------------------------------------------------
@@ -1368,6 +1442,40 @@ mod tests {
     // ------------------------------------------------------------------
     // VX 分段存档（RMVX_test/Save1.rvdata：14 段独立对象格式）
     // ------------------------------------------------------------------
+
+    /// 哈希形式 @data 的变量节点读写（自定义脚本存档）
+    #[test]
+    fn variable_node_hash_data() {
+        // 标准 VXA 布局：index 6 = Game_Variables(@data = {2 => 5})
+        let bytes: Vec<u8> = vec![
+            4, 8, b'[', 18, b'0', b'0', b'0', b'0', b'0', b'0', b'o', b':', 19, b'G', b'a',
+            b'm', b'e', b'_', b'V', b'a', b'r', b'i', b'a', b'b', b'l', b'e', b's', 0x06,
+            b':', 10, b'@', b'd', b'a', b't', b'a', b'{', 6, b'i', 7, b'i', 10, b'0', b'0',
+            b'0', b'0', b'0', b'0',
+        ];
+        let mut save = SaveData::from_bytes(&bytes, Engine::VxAce).expect("解析手工存档");
+        // 读取：变量 2 存在（值 5），变量 1 不存在
+        let (seg, node) = save.variable_node(2).expect("变量 2 应有节点");
+        assert_eq!(seg, 0, "标准布局应在主段");
+        assert_eq!(save.tree.as_fixnum(node), Some(5));
+        assert!(save.variable_node(1).is_none(), "变量 1 不应存在");
+        // 替换已有键
+        let n = save.tree.new_fixnum(99);
+        assert!(save.set_variable_node(2, n));
+        let (_, n2) = save.variable_node(2).expect("变量 2 应有节点");
+        assert_eq!(save.tree.as_fixnum(n2), Some(99));
+        // 插入新键
+        let s = save.tree.new_string("abc");
+        assert!(save.set_variable_node(3, s));
+        let (_, n3) = save.variable_node(3).expect("变量 3 应有节点");
+        assert_eq!(save.tree.as_string(n3).as_deref(), Some("abc"));
+        // 哈希结构完好（恰好 2 对）
+        let d = save.tree.ivar(save.layout.as_ref().unwrap().variables.unwrap(), "data").unwrap();
+        match save.tree.kind(d) {
+            rgss_marshal::Kind::Hash { pairs, .. } => assert_eq!(pairs.len(), 2),
+            _ => panic!("@data 应为哈希"),
+        }
+    }
 
     fn vx_fixture() -> SaveData {
         let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../RMVX_test/Save1.rvdata");

@@ -17,7 +17,7 @@ fn main() {
     let needle = &args[2];
     let out_path = args.get(3).cloned().unwrap_or_else(|| "out.bin".to_string());
 
-    let mut pos = 0usize;
+    let mut pos;
     // 头部: "RGSSAD\0" + version 字节（共 8 字节）
     let magic = if archive.starts_with(b"RGSSAD\x00\x03") {
         pos = 8;

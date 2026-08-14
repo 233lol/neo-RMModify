@@ -3,6 +3,7 @@
 use egui::RichText;
 
 use crate::app::App;
+use crate::save_view::SaveView;
 
 pub fn show_variables(app: &mut App, ui: &mut egui::Ui) {
     let App { save, db, var_search, dirty, .. } = app;
@@ -71,13 +72,53 @@ pub fn show_variables(app: &mut App, ui: &mut egui::Ui) {
                         if !query_lower.is_empty() && !name.to_lowercase().contains(&query_lower) {
                             continue;
                         }
-                        let v = save.variable(id).unwrap_or(0);
                         ui.label(id.to_string());
                         if is_named {
                             ui.label(name);
                         } else {
                             ui.label(RichText::new("—").weak());
                         }
+                        if let SaveView::Marshal(s) = save {
+                            // Marshal 存档：类型只读显示 + 按类型自动匹配输入框
+                            match s.variable_node(id) {
+                                Some((seg, node)) => {
+                                    let new_node = {
+                                        let tree = s.seg_tree_mut(seg);
+                                        ui.label(
+                                            RichText::new(crate::ui_raw::leaf_type_label(tree, node))
+                                                .weak(),
+                                        );
+                                        let (_, nn) =
+                                            crate::ui_raw::edit_leaf_value(tree, ui, node, dirty);
+                                        nn
+                                    };
+                                    if let Some(nn) = new_node {
+                                        s.set_variable_node(id, nn);
+                                    }
+                                }
+                                None => {
+                                    // 非标准布局 / 缺失节点：默认整数编辑
+                                    ui.label(RichText::new("整数").weak());
+                                    let mut val = s.variable(id).unwrap_or(0);
+                                    if ui
+                                        .add(
+                                            egui::DragValue::new(&mut val)
+                                                .range(i64::MIN..=i64::MAX)
+                                                .speed(1.0),
+                                        )
+                                        .changed()
+                                    {
+                                        s.set_variable(id, val);
+                                        *dirty = true;
+                                    }
+                                }
+                            }
+                            ui.end_row();
+                            continue;
+                        }
+                        // LCF（2000/2003）：变量固定为整数
+                        ui.label(RichText::new("整数").weak());
+                        let v = save.variable(id).unwrap_or(0);
                         let mut val = v;
                         if ui
                             .add(

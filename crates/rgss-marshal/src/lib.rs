@@ -413,6 +413,42 @@ impl Tree {
         }
     }
 
+    /// 用十进制字符串改写 Bignum（可带 `-` 号）。非法输入或非 Bignum 节点返回 false。
+    pub fn set_bignum_decimal(&mut self, idx: u32, s: &str) -> bool {
+        let s = s.trim();
+        let (neg, digits) = match s.strip_prefix('-') {
+            Some(r) => (true, r),
+            None => (false, s),
+        };
+        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+            return false;
+        }
+        // words 为小端 16 位基底：逐位 乘 10 累加
+        let mut words: Vec<u16> = Vec::new();
+        for b in digits.bytes() {
+            let mut carry = u64::from(b - b'0');
+            for w in &mut words {
+                let v = u64::from(*w) * 10 + carry;
+                *w = (v & 0xffff) as u16;
+                carry = v >> 16;
+            }
+            while carry > 0 {
+                words.push((carry & 0xffff) as u16);
+                carry >>= 16;
+            }
+        }
+        if words.is_empty() {
+            words.push(0);
+        }
+        if let Kind::Bignum { sign, words: slot } = &mut self.nodes[idx as usize].kind {
+            *sign = !neg;
+            *slot = words;
+            true
+        } else {
+            false
+        }
+    }
+
     /// 取字符串显示值（哨兵安全）
     pub fn as_string(&self, idx: u32) -> Option<String> {
         if idx == NIL_NODE || idx == TRUE_NODE || idx == FALSE_NODE {
@@ -1406,5 +1442,37 @@ mod tests {
             b':', 6, b'b', b'i', 0x0C,
         ];
         assert_eq!(out, expect);
+    }
+
+    #[test]
+    fn set_bignum_decimal_roundtrip() {
+        // 手工构造 Bignum：l + 2 个字 65537
+        let bytes = vec![4, 8, b'l', b'+', 0x07, 0x01, 0x00, 0x01, 0x00];
+        let mut tree = parse(&bytes).unwrap();
+        let root = tree.root();
+        assert_eq!(tree.bignum_to_string(root).as_deref(), Some("65537"));
+
+        // 改为大数（超出 u32，需要多字）
+        assert!(tree.set_bignum_decimal(root, "12345678901234567890"));
+        assert_eq!(
+            tree.bignum_to_string(root).as_deref(),
+            Some("12345678901234567890")
+        );
+        // 负数
+        assert!(tree.set_bignum_decimal(root, "-42"));
+        assert_eq!(tree.bignum_to_string(root).as_deref(), Some("-42"));
+        // 零
+        assert!(tree.set_bignum_decimal(root, "0"));
+        assert_eq!(tree.bignum_to_string(root).as_deref(), Some("0"));
+        // 非法输入不改动
+        assert!(!tree.set_bignum_decimal(root, "12a"));
+        assert!(!tree.set_bignum_decimal(root, ""));
+        assert_eq!(tree.bignum_to_string(root).as_deref(), Some("0"));
+        // 非 Bignum 节点拒绝
+        let fix = tree.new_fixnum(5);
+        assert!(!tree.set_bignum_decimal(fix, "9"));
+        // 编辑后仍可字节级往返
+        assert!(tree.set_bignum_decimal(root, "70000"));
+        roundtrip(&dump(&tree));
     }
 }
