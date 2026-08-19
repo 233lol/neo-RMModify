@@ -3,6 +3,8 @@
 #[cfg(test)]
 mod app;
 #[cfg(test)]
+mod icon;
+#[cfg(test)]
 mod save_view;
 #[cfg(test)]
 mod ui_inventory;

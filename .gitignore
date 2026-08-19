@@ -5,3 +5,5 @@ tmp/
 RM2000_test/
 RMVX_test/
 RMXP_test/
+# build.rs 自动生成的程序图标（app.ico / app.rc），随 icon.rs 源码再生成
+crates/editor/assets/
