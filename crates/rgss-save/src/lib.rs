@@ -1141,7 +1141,7 @@ fn layout_from_array(_tree: &Tree, engine: Engine, items: &[u32]) -> Option<Layo
             l.actors = Some(items[5]);
             l.party = Some(items[6]);
         }
-        Engine::Rm2000 | Engine::Rm2003 => return None,
+        Engine::Rm2000 | Engine::Rm2003 | Engine::WolfRpg => return None,
     }
     Some(l)
 }

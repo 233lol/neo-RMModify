@@ -30,11 +30,17 @@ pub(crate) mod test_hooks {
 }
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
+    // Wolf 存档走独立树视图（节点类型与 Marshal/LCF 不同）
+    if matches!(app.save, Some(SaveView::Wolf(_))) {
+        crate::ui_wolf::show_raw(app, ui);
+        return;
+    }
     let App { save, dirty, .. } = app;
     let Some(save) = save.as_mut() else { return };
     match save {
         SaveView::Marshal(s) => show_marshal(s, ui, dirty),
         SaveView::Lsd(s) => show_lcf(s, ui, dirty),
+        SaveView::Wolf(_) => unreachable!(),
     }
 }
 

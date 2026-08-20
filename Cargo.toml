@@ -5,6 +5,7 @@ members = [
     "crates/rgss-lcf",
     "crates/rgss-db",
     "crates/rgss-save",
+    "crates/rgss-wolf",
     "crates/editor",
 ]
 

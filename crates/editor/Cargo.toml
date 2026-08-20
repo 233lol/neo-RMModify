@@ -8,6 +8,7 @@ rgss-marshal = { path = "../rgss-marshal" }
 rgss-lcf = { path = "../rgss-lcf" }
 rgss-db = { path = "../rgss-db" }
 rgss-save = { path = "../rgss-save" }
+rgss-wolf = { path = "../rgss-wolf" }
 # 关闭默认特性（wgpu/accesskit/wayland/x11/default_fonts 等），仅保留 glow 后端，大幅缩小体积
 eframe = { version = "0.36", default-features = false, features = ["glow"] }
 # 不用 egui 内置字体（1.4MB），改为内嵌最小子集 + 系统字体

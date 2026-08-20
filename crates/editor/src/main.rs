@@ -8,6 +8,7 @@ mod ui_actors;
 mod ui_inventory;
 mod ui_raw;
 mod ui_variables;
+mod ui_wolf;
 
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {

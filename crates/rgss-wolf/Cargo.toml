@@ -1,0 +1,11 @@
+[package]
+name = "rgss-wolf"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+encoding_rs = "0.8"
+
+[[bin]]
+name = "wolf-dump"
+path = "src/bin/wolf-dump.rs"

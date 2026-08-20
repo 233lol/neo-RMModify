@@ -406,6 +406,7 @@ dependencies = [
  "rgss-lcf",
  "rgss-marshal",
  "rgss-save",
+ "rgss-wolf",
 ]
 
 [[package]]
@@ -1728,6 +1729,7 @@ version = "0.1.0"
 dependencies = [
  "rgss-lcf",
  "rgss-marshal",
+ "rgss-wolf",
 ]
 
 [[package]]
@@ -1754,6 +1756,13 @@ dependencies = [
  "rgss-db",
  "rgss-lcf",
  "rgss-marshal",
+]
+
+[[package]]
+name = "rgss-wolf"
+version = "0.1.0"
+dependencies = [
+ "encoding_rs",
 ]
 
 [[package]]

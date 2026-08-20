@@ -14,6 +14,8 @@ mod ui_actors;
 mod ui_variables;
 #[cfg(test)]
 mod ui_raw;
+#[cfg(test)]
+mod ui_wolf;
 
 #[cfg(test)]
 mod tests {
@@ -470,6 +472,7 @@ mod tests {
                 rgss_marshal::Kind::Fixnum(f) => Some(*f),
                 _ => None,
             },
+            SaveView::Wolf(_) => None,
             SaveView::Lsd(_) => None,
         };
         assert!(val.is_some_and(|f| f != 10), "拖拽后值应改变，实际: {val:?}");
@@ -516,6 +519,7 @@ mod tests {
 
         let root = match app.save.as_ref().unwrap() {
             SaveView::Marshal(s) => s.tree.root(),
+            SaveView::Wolf(_) => unreachable!(),
             SaveView::Lsd(_) => unreachable!(),
         };
         let (k, v) = match &app.save.as_ref().unwrap() {
@@ -523,11 +527,13 @@ mod tests {
                 rgss_marshal::Kind::Hash { pairs, .. } => pairs[0],
                 _ => panic!("应为哈希"),
             },
+            SaveView::Wolf(_) => unreachable!(),
             SaveView::Lsd(_) => unreachable!(),
         };
         assert_eq!(k, 1, "键应是 1");
         let is_false = match app.save.as_ref().unwrap() {
             SaveView::Marshal(s) => matches!(s.tree.kind(v), rgss_marshal::Kind::False),
+            SaveView::Wolf(_) => unreachable!(),
             SaveView::Lsd(_) => unreachable!(),
         };
         assert!(is_false, "切换后应为 false（新节点 {v}），实际不是布尔假");
@@ -601,6 +607,7 @@ mod tests {
                 rgss_marshal::Kind::Fixnum(f) => Some(*f),
                 _ => None,
             },
+            SaveView::Wolf(_) => None,
             SaveView::Lsd(_) => None,
         };
         assert!(val.is_some_and(|f| f == 35), "拖拽 +30 后应为 35，实际: {val:?}");
@@ -674,6 +681,7 @@ mod tests {
 
         let val = match app.save.as_ref().unwrap() {
             SaveView::Marshal(s) => s.tree.bignum_to_string(1),
+            SaveView::Wolf(_) => None,
             SaveView::Lsd(_) => None,
         };
         assert_eq!(val.as_deref(), Some("99"), "输入 99 后应生效，实际: {val:?}");
@@ -726,6 +734,7 @@ mod tests {
                 rgss_marshal::Kind::Array(items) => items.len() == 1,
                 _ => false,
             },
+            SaveView::Wolf(_) => false,
             SaveView::Lsd(_) => false,
         };
         assert!(ok, "内层数组应仍有 1 个元素");
@@ -736,6 +745,7 @@ mod tests {
                 }
                 _ => false,
             },
+            SaveView::Wolf(_) => false,
             SaveView::Lsd(_) => false,
         };
         assert!(is_false, "切换后内层元素应为 false");
@@ -782,6 +792,7 @@ mod tests {
                 }
                 _ => false,
             },
+            SaveView::Wolf(_) => false,
             SaveView::Lsd(_) => false,
         };
         assert!(ok, "循环结构应原样保留");
@@ -828,6 +839,7 @@ mod tests {
 
         let root = match app.save.as_ref().unwrap() {
             SaveView::Marshal(s) => s.tree.root(),
+            SaveView::Wolf(_) => unreachable!(),
             SaveView::Lsd(_) => unreachable!(),
         };
         let (new_k, new_v) = {
@@ -916,6 +928,7 @@ mod tests {
 
         let root = match app.save.as_ref().unwrap() {
             SaveView::Marshal(s) => s.tree.root(),
+            SaveView::Wolf(_) => unreachable!(),
             SaveView::Lsd(_) => unreachable!(),
         };
         let new_idx = {
@@ -1001,6 +1014,7 @@ mod tests {
 
         let root = match app.save.as_ref().unwrap() {
             SaveView::Marshal(s) => s.tree.root(),
+            SaveView::Wolf(_) => unreachable!(),
             SaveView::Lsd(_) => unreachable!(),
         };
         let item = match &app.save.as_ref().unwrap() {
@@ -1008,6 +1022,7 @@ mod tests {
                 rgss_marshal::Kind::Array(items) => items.first().copied(),
                 _ => None,
             },
+            SaveView::Wolf(_) => None,
             SaveView::Lsd(_) => None,
         };
         // 哨兵安全断言：不再是 NIL 哨兵，且新节点为整数 0
@@ -1019,6 +1034,7 @@ mod tests {
                 }
                 _ => false,
             },
+            SaveView::Wolf(_) => false,
             SaveView::Lsd(_) => false,
         };
         assert!(is_fixnum_0, "nil 应转换为整数 0");
@@ -1112,6 +1128,7 @@ mod tests {
         run_frame(&ctx, &mut app, Vec::new());
         let root = match app.save.as_ref().unwrap() {
             SaveView::Marshal(s) => s.tree.root(),
+            SaveView::Wolf(_) => unreachable!(),
             SaveView::Lsd(_) => unreachable!(),
         };
         let pairs = match &app.save.as_ref().unwrap() {
@@ -1119,6 +1136,7 @@ mod tests {
                 rgss_marshal::Kind::Hash { pairs, .. } => pairs.len(),
                 _ => 0,
             },
+            SaveView::Wolf(_) => 0,
             SaveView::Lsd(_) => 0,
         };
         assert_eq!(pairs, 1, "删除后应只剩一个键值对");
@@ -1179,6 +1197,7 @@ mod tests {
         run_frame(&ctx, &mut app, Vec::new());
         let root = match app.save.as_ref().unwrap() {
             SaveView::Marshal(s) => s.tree.root(),
+            SaveView::Wolf(_) => unreachable!(),
             SaveView::Lsd(_) => unreachable!(),
         };
         let items = match &app.save.as_ref().unwrap() {
@@ -1186,6 +1205,7 @@ mod tests {
                 rgss_marshal::Kind::Array(items) => items.clone(),
                 _ => vec![],
             },
+            SaveView::Wolf(_) => vec![],
             SaveView::Lsd(_) => vec![],
         };
         assert_eq!(items.len(), 2, "删除后应剩两个元素");
@@ -1257,6 +1277,7 @@ mod tests {
         run_frame(&ctx, &mut app, Vec::new());
         let root = match app.save.as_ref().unwrap() {
             SaveView::Marshal(s) => s.tree.root(),
+            SaveView::Wolf(_) => unreachable!(),
             SaveView::Lsd(_) => unreachable!(),
         };
         let items = match &app.save.as_ref().unwrap() {
@@ -1264,6 +1285,7 @@ mod tests {
                 rgss_marshal::Kind::Array(items) => items.clone(),
                 _ => vec![],
             },
+            SaveView::Wolf(_) => vec![],
             SaveView::Lsd(_) => vec![],
         };
         assert_eq!(items.len(), 1, "删除后应只剩整数");
@@ -1336,6 +1358,7 @@ mod tests {
         run_frame(&ctx, &mut app, Vec::new());
         let root = match app.save.as_ref().unwrap() {
             SaveView::Marshal(s) => s.tree.root(),
+            SaveView::Wolf(_) => unreachable!(),
             SaveView::Lsd(_) => unreachable!(),
         };
         let items = match &app.save.as_ref().unwrap() {
@@ -1343,6 +1366,7 @@ mod tests {
                 rgss_marshal::Kind::Array(items) => items.len(),
                 _ => 0,
             },
+            SaveView::Wolf(_) => 0,
             SaveView::Lsd(_) => 0,
         };
         assert_eq!(items, 0, "删除后数组应为空");
@@ -1388,6 +1412,7 @@ mod tests {
         // 结构未被破坏：哈希值仍是数组且元素为 2
         let root = match app.save.as_ref().unwrap() {
             SaveView::Marshal(s) => s.tree.root(),
+            SaveView::Wolf(_) => unreachable!(),
             SaveView::Lsd(_) => unreachable!(),
         };
         let ok = match &app.save.as_ref().unwrap() {
@@ -1395,6 +1420,7 @@ mod tests {
                 rgss_marshal::Kind::Hash { pairs, .. } => pairs.len() == 1,
                 _ => false,
             },
+            SaveView::Wolf(_) => false,
             SaveView::Lsd(_) => false,
         };
         assert!(ok, "哈希应保持一个键值对");
@@ -1445,6 +1471,7 @@ mod tests {
         // 结构完好
         let root = match app.save.as_ref().unwrap() {
             SaveView::Marshal(s) => s.tree.root(),
+            SaveView::Wolf(_) => unreachable!(),
             SaveView::Lsd(_) => unreachable!(),
         };
         let ok = match &app.save.as_ref().unwrap() {
@@ -1452,6 +1479,7 @@ mod tests {
                 rgss_marshal::Kind::Hash { pairs, .. } => pairs.len() == 1,
                 _ => false,
             },
+            SaveView::Wolf(_) => false,
             SaveView::Lsd(_) => false,
         };
         assert!(ok, "哈希应保持一个键值对");
@@ -1505,6 +1533,7 @@ mod tests {
         run_frame(&ctx, &mut app, Vec::new());
         let root = match app.save.as_ref().unwrap() {
             SaveView::Marshal(s) => s.tree.root(),
+            SaveView::Wolf(_) => unreachable!(),
             SaveView::Lsd(_) => unreachable!(),
         };
         let n = match &app.save.as_ref().unwrap() {
@@ -1512,6 +1541,7 @@ mod tests {
                 rgss_marshal::Kind::Hash { pairs, .. } => pairs.len(),
                 _ => 0,
             },
+            SaveView::Wolf(_) => 0,
             SaveView::Lsd(_) => 0,
         };
         assert_eq!(n, 0, "删除后哈希应为空");
@@ -1575,6 +1605,7 @@ mod tests {
 
         let root = match app.save.as_ref().unwrap() {
             SaveView::Marshal(s) => s.tree.root(),
+            SaveView::Wolf(_) => unreachable!(),
             SaveView::Lsd(_) => unreachable!(),
         };
         let item = {
@@ -1647,6 +1678,7 @@ mod tests {
 
         let root = match app.save.as_ref().unwrap() {
             SaveView::Marshal(s) => s.tree.root(),
+            SaveView::Wolf(_) => unreachable!(),
             SaveView::Lsd(_) => unreachable!(),
         };
         let item = {
@@ -1719,6 +1751,7 @@ mod tests {
             SaveView::Marshal(s) => s
                 .variable_node(2)
                 .expect("变量 2 应有值节点"),
+            SaveView::Wolf(_) => unreachable!(),
             SaveView::Lsd(_) => unreachable!(),
         };
         let val = match &app.save.as_ref().unwrap() {
@@ -1726,6 +1759,7 @@ mod tests {
                 rgss_marshal::Kind::Fixnum(f) => Some(*f),
                 _ => None,
             },
+            SaveView::Wolf(_) => None,
             SaveView::Lsd(_) => None,
         };
         assert_eq!(val, Some(35), "拖拽后变量 2 应为 35");
@@ -1762,6 +1796,7 @@ mod tests {
         let save = app.save.as_ref().unwrap();
         let seg_count = match save {
             SaveView::Marshal(s) => s.tail_before.len() + 1 + s.tail_after.len(),
+            SaveView::Wolf(_) => unreachable!(),
             SaveView::Lsd(_) => unreachable!(),
         };
         assert_eq!(seg_count, 14, "VX 夹具应为 14 段");
@@ -1922,11 +1957,13 @@ mod tests {
         assert!(!rects.is_empty(), "变量页应渲染输入框");
         let before = match app.save.as_ref().unwrap() {
             SaveView::Marshal(s) => s.variable(1),
+            SaveView::Wolf(_) => None,
             SaveView::Lsd(_) => None,
         };
         drag_by(&ctx, &mut app, rects[0].center(), 30.0);
         let after = match app.save.as_ref().unwrap() {
             SaveView::Marshal(s) => s.variable(1),
+            SaveView::Wolf(_) => None,
             SaveView::Lsd(_) => None,
         };
         assert_ne!(before, after, "变量 1 应可编辑");
@@ -1973,5 +2010,93 @@ mod tests {
         let doc2 = rgss_lcf::parse(&out).expect("重解析");
         assert_eq!(doc2.element_field(0x6C, 1, 0x1F).and_then(|f| f.typed.as_ref()).and_then(|t| t.as_int()), Some(42));
         assert_eq!(doc2.element_field(0x6C, 2, 0x1F).and_then(|f| f.typed.as_ref()).and_then(|t| t.as_int()), Some(9), "未编辑的角色 2 等级不变");
+    }
+
+    /// Wolf RPG 存档：变量页 / 原始数据页渲染不崩溃 + 行内编辑生效
+    #[test]
+    fn wolf_save_renders_and_edits() {
+        let path = std::path::Path::new("../../Wolf_test/Save/SaveData01.sav");
+        if !path.exists() {
+            eprintln!("跳过：缺少夹具 {path:?}");
+            return;
+        }
+        let ctx = egui::Context::default();
+        crate::app::load_cn_font(&ctx);
+        let mut app = App {
+            db: Some(rgss_db::Database::load(std::path::Path::new("../../Wolf_test")).expect("加载 Wolf 数据库")),
+            save: Some(SaveView::Wolf(
+                rgss_wolf::WolfSave::open(path).expect("打开 Wolf 存档"),
+            )),
+            game_dir: None,
+            status: String::new(),
+            status_color: egui::Color32::GRAY,
+            tab: Tab::Variables,
+            dirty: false,
+            sel_actor: None,
+            inv_tab: InvKind::Item,
+            inv_search: String::new(),
+            inv_selected: Default::default(),
+            inv_batch_qty: 1,
+            var_search: String::new(),
+            sw_search: String::new(),
+            skill_search: String::new(),
+            state_search: String::new(),
+            last_error: None,
+        };
+        // 变量页渲染
+        run_frame(&ctx, &mut app, Vec::new());
+        assert_eq!(app.save.as_ref().unwrap().engine(), rgss_db::Engine::WolfRpg);
+        // 原始数据页渲染
+        app.tab = Tab::Raw;
+        run_frame(&ctx, &mut app, Vec::new());
+        run_frame(&ctx, &mut app, Vec::new());
+        // API 级编辑写回：改游戏名 + 变量数据 → 保存 → 重解析
+        let SaveView::Wolf(s) = app.save.as_mut().unwrap() else { unreachable!() };
+        assert!(s.game_name.set_string("测试名称", s.is_utf8));
+        let out = s.dump_bytes();
+        let re = rgss_wolf::WolfSave::from_bytes(&out).expect("重解析");
+        assert_eq!(re.game_name_display(), "测试名称");
+        assert_ne!(out, std::fs::read(path).unwrap());
+    }
+
+    /// Wolf 原始数据页：数值搜索能定位到所有匹配叶子，且能按路径编辑写回
+    #[test]
+    fn wolf_search_locates_and_edits_values() {
+        use rgss_wolf::node::Node;
+        // 构造两段数据：U32(100)、嵌套 Sec 里的 I32(-5)、List 里的 U16(100)/U16(7)
+        let mut segments = vec![
+            vec![
+                ("a".to_string(), Node::U32(100)),
+                (
+                    "b".to_string(),
+                    Node::Sec(vec![
+                        ("c".to_string(), Node::I32(-5)),
+                        (
+                            "d".to_string(),
+                            Node::List(vec![Node::U16(100), Node::U16(7)]),
+                        ),
+                    ]),
+                ),
+            ],
+            vec![("e".to_string(), Node::U8(100))],
+        ];
+        // 收集所有值为 100 的路径
+        let mut matches: Vec<(usize, Vec<String>)> = Vec::new();
+        for (si, seg) in segments.iter().enumerate() {
+            for (k, node) in seg {
+                let mut path = vec![k.clone()];
+                crate::ui_wolf::collect_num_matches(node, 100, si, &mut path, &mut matches);
+            }
+        }
+        assert_eq!(matches.len(), 3, "三处匹配：a、d[0]、e");
+        // 编辑 b.c（I32 -5）
+        let path: Vec<String> = vec!["b".into(), "c".into()];
+        let node = crate::ui_wolf::node_at_mut(&mut segments, 0, &path).expect("按路径定位");
+        assert!(matches!(node, Node::I32(-5)));
+        assert!(node.set_u64(999));
+        // 验证写回
+        let Node::Sec(b_fields) = &segments[0][1].1 else { panic!() };
+        let c = b_fields.iter().find(|(k, _)| k == "c").unwrap().1.as_u64();
+        assert_eq!(c, Some(999));
     }
 }

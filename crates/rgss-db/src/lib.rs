@@ -21,6 +21,8 @@ pub enum Engine {
     Rm2000,
     /// RPG Maker 2003 (LCF 格式)
     Rm2003,
+    /// Wolf RPG Editor（ウディタ，.sav）
+    WolfRpg,
 }
 
 impl Engine {
@@ -31,6 +33,7 @@ impl Engine {
             Engine::Xp => "XP",
             Engine::Rm2000 => "2000",
             Engine::Rm2003 => "2003",
+            Engine::WolfRpg => "Wolf RPG",
         }
     }
 
@@ -41,6 +44,7 @@ impl Engine {
             Engine::Vx => "rvdata",
             Engine::Xp => "rxdata",
             Engine::Rm2000 | Engine::Rm2003 => "ldb",
+            Engine::WolfRpg => "project",
         }
     }
 
@@ -51,12 +55,13 @@ impl Engine {
             Engine::Vx => "rvdata",
             Engine::Xp => "rxdata",
             Engine::Rm2000 | Engine::Rm2003 => "lsd",
+            Engine::WolfRpg => "sav",
         }
     }
 
-    /// 是否使用 Ruby Marshal 格式（2000/2003 为 LCF）
+    /// 是否使用 Ruby Marshal 格式（2000/2003 为 LCF，Wolf RPG 为自有格式）
     pub fn is_marshal(&self) -> bool {
-        !matches!(self, Engine::Rm2000 | Engine::Rm2003)
+        !matches!(self, Engine::Rm2000 | Engine::Rm2003 | Engine::WolfRpg)
     }
 }
 
@@ -111,6 +116,16 @@ pub fn detect_engine(game_dir: &Path) -> Option<Engine> {
         if ini.contains("RGSS100") || ini.contains("RGSS101") || ini.contains("RGSS102") {
             return Some(Engine::Xp);
         }
+        // Wolf RPG Editor：Game.ini 无 RGSS 标记，且有 Data.wolf 加密包
+        // 或未加密的 Data/BasicData/CDataBase.project（或 Game.dat）。
+        // 注意：必须放在 RGSS 判断之后（mkxp 版 RMXP 的 Game.ini 有 RGSS 标记）。
+        if game_dir.join("Data.wolf").exists()
+            || game_dir.join("Data").join("BasicData").join("CDataBase.project").exists()
+            || game_dir.join("Data").join("Game.dat").exists()
+            || game_dir.join("VersionConfig.ini").exists()
+        {
+            return Some(Engine::WolfRpg);
+        }
     }
     None
 }
@@ -164,11 +179,21 @@ pub struct Database {
     pub class_exps: HashMap<u32, Vec<i64>>,
     /// 失败信息列表（如缺文件）
     pub warnings: Vec<String>,
+    /// Wolf RPG 变量数据库项目（类型/字段名；仅 WolfRpg 引擎有值）
+    pub wolf_project: Option<rgss_wolf::db::Project>,
 }
 
 impl Database {
     /// 概要信息（用于状态栏显示）
     pub fn info(&self) -> String {
+        if self.engine == Engine::WolfRpg {
+            let n = self
+                .wolf_project
+                .as_ref()
+                .map(|p| p.types.len())
+                .unwrap_or(0);
+            return format!("Wolf RPG （{} 个变量类型）", n);
+        }
         format!(
             "{} （{} 角色 / {} 物品 / {} 武器 / {} 防具 / {} 开关名 / {} 变量名）",
             self.engine.label(),
@@ -185,6 +210,9 @@ impl Database {
         let engine = detect_engine(game_dir).ok_or_else(|| {
             "无法识别游戏版本：目录中未找到 Game.rvproj2 / Game.rvproj / Game.rxproj / RPG_RT.ini".to_string()
         })?;
+        if engine == Engine::WolfRpg {
+            return load_wolf(game_dir);
+        }
         if !engine.is_marshal() {
             return load_lcf(engine, game_dir);
         }
@@ -408,6 +436,39 @@ fn load_lcf(engine: Engine, game_dir: &Path) -> Result<Database, String> {
     Ok(db)
 }
 
+/// 加载 Wolf RPG 变量数据库项目（Data/BasicData/CDataBase.project）。
+/// 项目在 Data.wolf 加密包内时无法直接读取（需先解包），此时返回空数据库 + 警告。
+fn load_wolf(game_dir: &Path) -> Result<Database, String> {
+    let mut db = Database {
+        engine: Engine::WolfRpg,
+        game_dir: game_dir.to_path_buf(),
+        ..Default::default()
+    };
+    let proj_path = game_dir
+        .join("Data")
+        .join("BasicData")
+        .join("CDataBase.project");
+    if !proj_path.exists() {
+        db.warnings.push(
+            "缺少 Data/BasicData/CDataBase.project（或在 Data.wolf 加密包内），变量名不可用".to_string(),
+        );
+        return Ok(db);
+    }
+    match rgss_wolf::db::load_project(&proj_path) {
+        Ok(proj) => {
+            let n = proj.types.len();
+            db.wolf_project = Some(proj);
+            if n == 0 {
+                db.warnings.push("CDataBase.project 未解析出任何类型".to_string());
+            }
+        }
+        Err(e) => {
+            db.warnings.push(format!("CDataBase.project 解析失败: {e}"));
+        }
+    }
+    Ok(db)
+}
+
 fn parse_data(path: &Path) -> Result<Tree, String> {
     let bytes = std::fs::read(path).map_err(|e| e.to_string())?;
     rgss_marshal::parse(&bytes).map_err(|e| e.to_string())
@@ -568,5 +629,23 @@ mod tests {
             return;
         }
         assert_eq!(detect_engine(&dir), Some(super::Engine::Xp));
+    }
+
+    /// Wolf_test：Game.ini 无 RGSS 标记 + Data.wolf / VersionConfig.ini → Wolf RPG
+    #[test]
+    fn detect_wolf_rpg() {
+        use super::detect_engine;
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Wolf_test");
+        if !dir.exists() {
+            eprintln!("跳过：缺少夹具 {dir:?}");
+            return;
+        }
+        assert_eq!(detect_engine(&dir), Some(super::Engine::WolfRpg));
+        let db = super::Database::load(&dir).expect("Wolf 数据库加载失败");
+        assert_eq!(db.engine, super::Engine::WolfRpg);
+        // Data.wolf 加密包内的项目文件读不到 → 有警告且无类型名
+        assert!(!db.warnings.is_empty(), "应有 CDataBase.project 缺失警告");
+        assert!(db.wolf_project.is_none());
+        assert!(db.info().contains("Wolf RPG"));
     }
 }

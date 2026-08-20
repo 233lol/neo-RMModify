@@ -1,12 +1,13 @@
 # AGENTS.md
 
-Rust workspace: RPG Maker VX Ace / VX / XP / 2000 / 2003 save-file editor. All code comments and UI strings are Chinese — keep them that way. Layered crates (dependency direction only):
+Rust workspace: RPG Maker VX Ace / VX / XP / 2000 / 2003 / Wolf RPG Editor save-file editor. All code comments and UI strings are Chinese — keep them that way. Layered crates (dependency direction only):
 
 - `crates/rgss-marshal` — Ruby Marshal 4.8 parser/serializer + RGSSAD/RGSS2A/RGSS3A 加密包解包（`rgss3a` 模块，格式与 mkxp rgssad.cpp 一致；v1 有 RMXP_test 夹具、v3 有 RMVXA_test 夹具，v2 仅手工构造测试）(no GUI deps)
 - `crates/rgss-lcf` — LCF container (LSD/LDB, RPG2000/2003) parser/serializer (no GUI deps; `encoding_rs` for GBK/Shift-JIS display)
-- `crates/rgss-db` — engine detection + database name extraction (Marshal 与 LDB 两套)
+- `crates/rgss-wolf` — Wolf RPG Editor 存档解密/解析/序列化（.sav）+ CDataBase.project 变量名解析（no GUI deps; 格式参考 Sinflower/WolfSave 逆向成果）
+- `crates/rgss-db` — engine detection + database name extraction（Marshal / LDB / Wolf project 三套）
 - `crates/rgss-save` — save-file editing API（`SaveData` = Marshal；`lcf::SaveLsd` = LSD）
-- `crates/editor` — egui/eframe GUI（`save_view::SaveView` 统一两种存档；`app.rs` 启动时自动探测系统中文字体，UI 各页为 `ui_variables.rs` / `ui_inventory.rs` / `ui_actors.rs` / `ui_raw.rs`）
+- `crates/editor` — egui/eframe GUI（`save_view::SaveView` 统一三种存档；`app.rs` 启动时自动探测系统中文字体，UI 各页为 `ui_variables.rs` / `ui_inventory.rs` / `ui_actors.rs` / `ui_raw.rs` / `ui_wolf.rs`）
 
 ## Commands
 
@@ -15,13 +16,16 @@ Rust workspace: RPG Maker VX Ace / VX / XP / 2000 / 2003 save-file editor. All c
 - `cargo run -q -p rgss-marshal --bin rgss-dump -- <file>` — dump a marshal file; `--roundtrip` verifies byte-exact parse→dump; `--json` prints a debug tree. The main debugging tool.
 - `cargo run -q -p rgss-lcf --example chklsd -- <file.lsd>` — LSD/LDB 的 chunk 结构摘要
 - `cargo run -q -p rgss-marshal --example rgss3a -- <包> <输出目录>` — 解包 RGSSAD/RGSS2A/RGSS3A 加密包（`-l` 只列文件）
+- `cargo run -q -p rgss-wolf --bin wolf-dump -- <file.sav>` — Wolf RPG 存档结构树；`--roundtrip` 校验字节级往返
 - `rgss-save/examples/e2e.rs` — 三引擎端到端验证；`rgss-db/examples/verify.rs` — 三引擎数据库名称验证。均使用真实夹具（RMVXA_test / RMVX_test / RM2000_test）。
 
 ## Core invariant: byte-exact roundtrip
 
 `parse(bytes)` → `dump()` must reproduce the input bytes exactly. Marshal 侧：shared object links (`@`), symbol links (`;`), float mantissas, string encoding ivars, hash defaults, bignums, multi-segment files. LCF 侧：`LcfField.raw` 保留未编辑字段的原始字节，未知 chunk 保持 `Raw` 直通。After any parser/serializer change run:
 
-`cargo run -q -p rgss-marshal --bin rgss-dump -- --roundtrip RMVXA_test/Save01.rvdata2`，还有 `RMVXA_test/Data` 下全部 `.rvdata2`、`RMVX_test/Save1.rvdata`（14 段）、`RM2000_test/game/Save0{1,2,3}.lsd` 与 `RPG_RT.ldb`（rgss-lcf 测试自带夹具断言）。
+`cargo run -q -p rgss-marshal --bin rgss-dump -- --roundtrip RMVXA_test/Save01.rvdata2`，还有 `RMVXA_test/Data` 下全部 `.rvdata2`、`RMVX_test/Save1.rvdata`（14 段）、`RM2000_test/game/Save0{1,2,3}.lsd` 与 `RPG_RT.ldb`（rgss-lcf 测试自带夹具断言）。Wolf 侧：`cargo run -q -p rgss-wolf --bin wolf-dump -- --roundtrip Wolf_test/Save/SaveData01.sav`（Wolf_test 测试也有断言）。
+
+Wolf 存档要点：前 0x14 字节明文头（校验和 @0x02 = 明文 0x14 起字节和 mod 256；@0x06 = 'U' 表示 UTF-8；@0x00/@0x03/@0x09 为种子），其后 MSVC rand 流式 XOR（`state = state*214013+2531011; rand = (state>>16)&0x7fff`）。解密种子 0/3/9 步长 1/2/5，加密为逆序（9/3/0，步长 5/2/1），两者互逆。明文为头（20B + 0x19 + 游戏名 MemData<u16> + u16 版本号）后 7 个数据段（SavePart1..5、变量数据库、SavePart7），结尾字节 0x19；各段字段随版本号条件增减。`Node` 树：叶子 = U8/U16/U32/U64/I32/Str{width,bytes}/Bytes，容器 = Sec(命名) / List(无计数前缀)，序列化顺序 = 解析顺序 —— dump 只需按存储顺序写回即可逐字节复现，无需重算条件。编辑仅改叶子；`CDataBase.project` 提供类型/字段名（解密种子暴力搜索 0..255），Data.wolf 加密包内的项目读不到 → 名称显示为编号。
 
 ## Editing values without corrupting links (easy to get wrong)
 
@@ -49,9 +53,9 @@ Rust workspace: RPG Maker VX Ace / VX / XP / 2000 / 2003 save-file editor. All c
 
 ## Fixtures & gotchas
 
-- `RMVXA_test/`（VX Ace，2 段存档）、`RMVX_test/`（VX，14 段独立对象存档）、`RM2000_test/game/`（2000，三份 LSD + LDB）、`RMXP_test/`（XP，《To the Moon》mkxp 版，save1/save4.rxdata 12 段分段存档 + `To the Moon.rgssad` 加密包）都是 gitignore 的真实游戏，改动不可恢复。
+- `RMVXA_test/`（VX Ace，2 段存档）、`RMVX_test/`（VX，14 段独立对象存档）、`RM2000_test/game/`（2000，三份 LSD + LDB）、`RMXP_test/`（XP，《To the Moon》mkxp 版，save1/save4.rxdata 12 段分段存档 + `To the Moon.rgssad` 加密包）、`Wolf_test/`（Wolf RPG，《Eye of the Incubus》，SaveData01.sav + System.sav 两份存档 + Data.wolf 加密包）都是 gitignore 的真实游戏，改动不可恢复。
 - 2000/2003 的 LSD 是标准 LCF（"LcfSaveData"）格式；`rework/` 里 RMModify 的 "@checksum" LSD 文档与夹具不符，仅作逆向历史参考。2003 无夹具，按 liblcf 字段表实现但未经实测。
 - 2000 角色存档存的是能力**修正值**（hp_mod 等），LDB 无武器/防具/职业/变量名；经验曲线在角色身上（无 class_exps）。
 - Release profile uses `opt-level = "s"` + `lto = true` + `panic = "abort"` → slow builds; use debug for iteration.
-- Engine detection keys: `Game.rvproj2` = VX Ace, `Game.rvproj` = VX, `Game.rxproj` = XP, `RPG_RT.ini` = 2000/2003（ini 含 "2003" 判 2003）。已发布/加密游戏（无项目文件）看 `Game.ini` 的 `Library=RGSS10x` = XP / `RGSS2xx` = VX / `RGSS3xx` = VXA（mkxp 版如 RMXP_test 只靠这个）。
+- Engine detection keys: `Game.rvproj2` = VX Ace, `Game.rvproj` = VX, `Game.rxproj` = XP, `RPG_RT.ini` = 2000/2003（ini 含 "2003" 判 2003）。已发布/加密游戏（无项目文件）看 `Game.ini` 的 `Library=RGSS10x` = XP / `RGSS2xx` = VX / `RGSS3xx` = VXA（mkxp 版如 RMXP_test 只靠这个）；Wolf RPG：`Game.ini` 无 RGSS 标记且存在 `Data.wolf` / `Data/BasicData/CDataBase.project` / `VersionConfig.ini`（`Game.exe`+`Data.wolf`+`Save/` 也常见）。
 - Repo has no commits or CI yet; don't assume a CI gate.

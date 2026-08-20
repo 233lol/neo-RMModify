@@ -103,8 +103,15 @@ impl App {
     }
 
     pub fn open_save(&mut self) {
-        // 全部引擎的存档扩展名都放行，按实际文件后缀分派解析器
+        // 全部引擎的存档扩展名都放行，按实际文件后缀分派解析器。
+        // 注意：Windows 文件对话框默认选中第一个过滤器 —— 必须把 .sav 放进第一个，
+        // 否则用户看不到 Wolf RPG 存档。
         let mut dialog = rfd::FileDialog::new().set_title("打开存档文件");
+        dialog = dialog.add_filter(
+            "全部支持 (*.rvdata2;*.rvdata;*.rxdata;*.lsd;*.sav)",
+            &["rvdata2", "rvdata", "rxdata", "lsd", "sav"],
+        );
+        dialog = dialog.add_filter("Wolf RPG 存档 (*.sav)", &["sav"]);
         dialog = dialog.add_filter(
             "RPG Maker 存档 (*.rvdata2;*.rvdata;*.rxdata;*.lsd)",
             &["rvdata2", "rvdata", "rxdata", "lsd"],
@@ -113,16 +120,14 @@ impl App {
             dialog = dialog.set_directory(dir);
         }
         if let Some(path) = dialog.pick_file() {
-            let is_lsd = path
+            let ext = path
                 .extension()
                 .and_then(|e| e.to_str())
-                .map(|e| e.eq_ignore_ascii_case("lsd"))
-                .unwrap_or(false);
-            let opened = if is_lsd {
-                rgss_save::lcf::SaveLsd::open(&path)
-                    .map(SaveView::Lsd)
-            } else {
-                SaveData::open(&path).map(SaveView::Marshal)
+                .map(|e| e.to_ascii_lowercase());
+            let opened = match ext.as_deref() {
+                Some("lsd") => rgss_save::lcf::SaveLsd::open(&path).map(SaveView::Lsd),
+                Some("sav") => rgss_wolf::WolfSave::open(&path).map(SaveView::Wolf),
+                _ => SaveData::open(&path).map(SaveView::Marshal),
             };
             match opened {
                 Ok(save) => {
@@ -131,6 +136,10 @@ impl App {
                     self.sel_actor = None;
                     self.inv_selected.clear();
                     self.dirty = false;
+                    // Wolf 存档默认落在变量数据库页
+                    if self.save.as_ref().is_some_and(|s| s.engine() == rgss_db::Engine::WolfRpg) {
+                        self.tab = Tab::Variables;
+                    }
                     // 总是从存档所在目录自动定位游戏：打开其他游戏的存档时切换数据库
                     let auto_info = self.auto_load_db_from_save(&path);
                     self.set_status(
@@ -315,9 +324,9 @@ impl App {
             if !has_save {
                 ui.vertical_centered(|ui| {
                     ui.add_space(120.0);
-                    ui.label(RichText::new("RPG Maker 存档编辑器").size(34.0).strong());
+                    ui.label(RichText::new("RPG Maker / Wolf RPG 存档编辑器").size(34.0).strong());
                     ui.add_space(10.0);
-                    ui.label("支持 VX Ace / VX / XP / 2000 / 2003");
+                    ui.label("支持 VX Ace / VX / XP / 2000 / 2003 / Wolf RPG");
                     ui.add_space(20.0);
                     if ui.button("选择游戏目录").clicked() {
                         self.open_game_dir();
@@ -348,14 +357,28 @@ impl App {
     }
 
     fn tabs(&mut self, ui: &mut egui::Ui) {
+        let is_wolf = self.save.as_ref().is_some_and(|s| s.engine() == rgss_db::Engine::WolfRpg);
         ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.tab, Tab::Actors, "角色");
-            ui.selectable_value(&mut self.tab, Tab::Inventory, "物品 / 武器 / 防具");
-            ui.selectable_value(&mut self.tab, Tab::Variables, "变量");
-            ui.selectable_value(&mut self.tab, Tab::Switches, "开关");
-            ui.selectable_value(&mut self.tab, Tab::Raw, "原始数据");
+            if is_wolf {
+                // Wolf 存档：仅变量数据库与原始数据两页（其余页不适用）
+                ui.selectable_value(&mut self.tab, Tab::Variables, "变量数据库");
+                ui.selectable_value(&mut self.tab, Tab::Raw, "原始数据");
+            } else {
+                ui.selectable_value(&mut self.tab, Tab::Actors, "角色");
+                ui.selectable_value(&mut self.tab, Tab::Inventory, "物品 / 武器 / 防具");
+                ui.selectable_value(&mut self.tab, Tab::Variables, "变量");
+                ui.selectable_value(&mut self.tab, Tab::Switches, "开关");
+                ui.selectable_value(&mut self.tab, Tab::Raw, "原始数据");
+            }
         });
         ui.separator();
+        if is_wolf {
+            match self.tab {
+                Tab::Variables => crate::ui_wolf::show_variables(self, ui),
+                _ => crate::ui_wolf::show_raw(self, ui),
+            }
+            return;
+        }
         match self.tab {
             Tab::Actors => crate::ui_actors::show(self, ui),
             Tab::Inventory => crate::ui_inventory::show(self, ui),
