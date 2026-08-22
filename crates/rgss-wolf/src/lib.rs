@@ -13,6 +13,7 @@
 //! 核心不变式：`parse(bytes) → dump()` 必须逐字节复现输入；未编辑的字段绝不改动。
 
 pub mod db;
+pub mod dxa;
 pub mod node;
 
 use node::Node;

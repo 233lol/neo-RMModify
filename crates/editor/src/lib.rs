@@ -2050,6 +2050,26 @@ mod tests {
         app.tab = Tab::Raw;
         run_frame(&ctx, &mut app, Vec::new());
         run_frame(&ctx, &mut app, Vec::new());
+
+        // 展开第一个嵌套容器再渲染。
+        // 回归测试：折叠体曾被包进 horizontal 布局，展开时 egui 的 indent()
+        // 只允许垂直布局而直接 panic —— 必须保持容器行处于垂直上下文。
+        crate::ui_wolf::test_hooks::clear();
+        run_frame(&ctx, &mut app, Vec::new());
+        // 直接把第一个容器置为展开（点击产生的内部状态变更会被测试框架丢弃，
+        // 手动 store 与 ui_raw 的手动开合同款、可持久化）
+        let (rect, id) = crate::ui_wolf::test_hooks::rects()
+            .first()
+            .copied()
+            .expect("应渲染出容器标题");
+        let mut st = egui::collapsing_header::CollapsingState::load_with_default_open(&ctx, id, false);
+        st.set_open(true);
+        st.store(&ctx);
+        for _ in 0..10 {
+            run_frame(&ctx, &mut app, Vec::new());
+        }
+        assert!(rect.right() > 0.0);
+
         // API 级编辑写回：改游戏名 + 变量数据 → 保存 → 重解析
         let SaveView::Wolf(s) = app.save.as_mut().unwrap() else { unreachable!() };
         assert!(s.game_name.set_string("测试名称", s.is_utf8));

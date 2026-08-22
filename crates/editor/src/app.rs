@@ -94,8 +94,10 @@ impl App {
                 Ok(db) => {
                     self.game_dir = Some(dir.clone());
                     let info = db.info();
+                    // 数据库警告（如 Data.wolf 解包结果）附在状态栏提示里
+                    let warn = db.warnings.first().map(|w| format!("（{w}）")).unwrap_or_default();
                     self.db = Some(db);
-                    self.set_status(format!("已加载游戏: {}", info), true);
+                    self.set_status(format!("已加载游戏: {}{warn}", info), true);
                 }
                 Err(e) => self.set_error(e),
             }
@@ -170,13 +172,15 @@ impl App {
         match Database::load(&game_dir) {
             Ok(db) => {
                 let info = db.info();
+                let warn = db.warnings.first().map(|w| format!("（{w}）")).unwrap_or_default();
                 self.game_dir = Some(game_dir);
                 self.db = Some(db);
-                if switched {
-                    format!("已自动切换游戏数据库（{info}）。")
+                let prefix = if switched {
+                    "已自动切换游戏数据库"
                 } else {
-                    format!("已自动加载游戏数据库（{info}）。")
-                }
+                    "已自动加载游戏数据库"
+                };
+                format!("{prefix}（{info}）。{warn}")
             }
             Err(e) => {
                 if self.db.is_none() {

@@ -436,8 +436,14 @@ fn load_lcf(engine: Engine, game_dir: &Path) -> Result<Database, String> {
     Ok(db)
 }
 
-/// 加载 Wolf RPG 变量数据库项目（Data/BasicData/CDataBase.project）。
-/// 项目在 Data.wolf 加密包内时无法直接读取（需先解包），此时返回空数据库 + 警告。
+/// Wolf RPG 数据临时解包目录名（位于游戏目录下，可随时删除）
+pub const WOLF_TMP_DIR: &str = "tmp";
+
+/// 加载 Wolf RPG 变量数据库项目。
+///
+/// 优先读取明文 `Data/BasicData/CDataBase.project`；不存在时尝试从 `Data.wolf`
+/// 加密包内提取该项目到游戏目录的 `tmp/` 文件夹（便于查看与复用）后再解析。
+/// 标准加密可直接解开；自定义密码的商业发行版会留下警告并显示编号。
 fn load_wolf(game_dir: &Path) -> Result<Database, String> {
     let mut db = Database {
         engine: Engine::WolfRpg,
@@ -448,25 +454,64 @@ fn load_wolf(game_dir: &Path) -> Result<Database, String> {
         .join("Data")
         .join("BasicData")
         .join("CDataBase.project");
-    if !proj_path.exists() {
+    if proj_path.exists() {
+        match rgss_wolf::db::load_project(&proj_path) {
+            Ok(proj) => {
+                let n = proj.types.len();
+                db.wolf_project = Some(proj);
+                if n == 0 {
+                    db.warnings.push("CDataBase.project 未解析出任何类型".to_string());
+                }
+            }
+            Err(e) => {
+                db.warnings.push(format!("CDataBase.project 解析失败: {e}"));
+            }
+        }
+        return Ok(db);
+    }
+
+    let wolf_path = game_dir.join("Data.wolf");
+    if !wolf_path.exists() {
         db.warnings.push(
-            "缺少 Data/BasicData/CDataBase.project（或在 Data.wolf 加密包内），变量名不可用".to_string(),
+            "缺少 Data/BasicData/CDataBase.project 与 Data.wolf，变量类型/字段名将显示为编号"
+                .to_string(),
         );
         return Ok(db);
     }
-    match rgss_wolf::db::load_project(&proj_path) {
-        Ok(proj) => {
-            let n = proj.types.len();
-            db.wolf_project = Some(proj);
-            if n == 0 {
-                db.warnings.push("CDataBase.project 未解析出任何类型".to_string());
+    match extract_cdatabase_from_wolf(&wolf_path, &game_dir.join(WOLF_TMP_DIR)) {
+        Ok((bytes, dest)) => match rgss_wolf::db::from_bytes(&bytes) {
+            Ok(proj) => {
+                db.wolf_project = Some(proj);
+                db.warnings
+                    .push(format!("已从 Data.wolf 解出项目文件到 {}", dest.display()));
             }
-        }
-        Err(e) => {
-            db.warnings.push(format!("CDataBase.project 解析失败: {e}"));
-        }
+            Err(e) => db
+                .warnings
+                .push(format!("提取出的 CDataBase.project 解析失败: {e}")),
+        },
+        Err(e) => db.warnings.push(e),
     }
     Ok(db)
+}
+
+/// 从 DXLib 加密包（Data.wolf）中提取 BasicData/CDataBase.project 到临时文件夹。
+/// 返回 (项目字节, 落盘路径)。
+fn extract_cdatabase_from_wolf(
+    wolf_path: &Path,
+    tmp_dir: &Path,
+) -> Result<(Vec<u8>, PathBuf), String> {
+    let arch = rgss_wolf::dxa::Archive::open(wolf_path)
+        .map_err(|e| format!("Data.wolf 打开失败：{e}"))?;
+    let idx = arch
+        .find("BasicData/CDataBase.project")
+        .ok_or_else(|| "Data.wolf 内未找到 BasicData/CDataBase.project".to_string())?;
+    let bytes = arch.read_entry(idx)?;
+    let dest = tmp_dir.join(arch.entry(idx).unwrap().path.replace('/', "\\"));
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("创建目录失败: {e}"))?;
+    }
+    std::fs::write(&dest, &bytes).map_err(|e| format!("写入 {} 失败: {e}", dest.display()))?;
+    Ok((bytes, dest))
 }
 
 fn parse_data(path: &Path) -> Result<Tree, String> {

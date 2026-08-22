@@ -16,6 +16,26 @@ const MAX_ROWS: usize = 2000;
 /// 单段最多渲染的树行数（防超大数组卡死）
 const MAX_TREE_ROWS: usize = 4000;
 
+#[cfg(test)]
+pub(crate) mod test_hooks {
+    //! UI 冒烟测试用：记录原始数据页容器标题的屏幕矩形与持久化 Id
+    use std::cell::RefCell;
+
+    use egui::{Id, Rect};
+
+    thread_local! {
+        pub static TEST_NODE_RECTS: RefCell<Vec<(Rect, Id)>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub fn clear() {
+        TEST_NODE_RECTS.with(|r| r.borrow_mut().clear());
+    }
+
+    pub fn rects() -> Vec<(Rect, Id)> {
+        TEST_NODE_RECTS.with(|r| r.borrow().clone())
+    }
+}
+
 /// 变量数据库页
 pub fn show_variables(app: &mut App, ui: &mut egui::Ui) {
     let App { save, db, dirty, .. } = app;
@@ -31,7 +51,8 @@ pub fn show_variables(app: &mut App, ui: &mut egui::Ui) {
     let project = db.as_ref().and_then(|d| d.wolf_project.as_ref());
     if project.is_none() {
         ui.weak(
-            "未找到 Data/BasicData/CDataBase.project（或在 Data.wolf 加密包内），类型与字段显示为编号。",
+            "未能读取变量数据库项目（已尝试从 Data.wolf 解出 CDataBase.project 到游戏目录 tmp 文件夹；\
+             该加密包可能使用自定义密码），类型与字段显示为编号。",
         );
     }
     ui.add_space(4.0);
@@ -472,7 +493,9 @@ fn node_row(
     }
 }
 
-/// 可折叠容器行
+/// 可折叠容器行。
+/// 注意：collapsing body 内部用 `indent()` 缩进，只允许垂直布局 ——
+/// 不能把折叠头包进 `horizontal`，缩进改为在头部行内加空隙。
 fn node_container(
     ui: &mut egui::Ui,
     key: &str,
@@ -480,19 +503,22 @@ fn node_container(
     title: String,
     body: impl FnOnce(&mut egui::Ui),
 ) {
-    indent_row(ui, depth, |ui| {
-        let id = ui.make_persistent_id(("node", depth, key));
-        egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false)
-            .show_header(ui, |ui| {
-                ui.label(title);
-            })
-            .body(|ui| {
-                body(ui);
-            });
-    });
+    let id = ui.make_persistent_id(("node", depth, key));
+    egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false)
+        .show_header(ui, |ui| {
+            ui.add_space(depth as f32 * 16.0);
+            // resp 仅测试钩子使用，非测试构建加下划线避免未用警告
+            let _resp = ui.label(title);
+            #[cfg(test)]
+            if depth == 1 {
+                crate::ui_wolf::test_hooks::TEST_NODE_RECTS
+                    .with(|r| r.borrow_mut().push((_resp.rect, id)));
+            }
+        })
+        .body(body);
 }
 
-/// 行缩进包装
+/// 行缩进包装（仅用于叶子等无折叠体的行；horizontal 里的子内容不得再 indent）
 fn indent_row(ui: &mut egui::Ui, depth: usize, body: impl FnOnce(&mut egui::Ui)) {
     ui.horizontal(|ui| {
         ui.add_space(depth as f32 * 16.0);
